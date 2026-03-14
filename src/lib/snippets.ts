@@ -2,28 +2,48 @@
  * Generate code snippets for GraphQL requests in various languages
  */
 
-export function generateSnippets(endpoint, query, variables = '{}', headers = '{}') {
+export interface Snippets {
+    curl: string;
+    javascript: string;
+    python: string;
+    php: string;
+    csharp: string;
+}
+
+export function generateSnippets(
+    endpoint: string,
+    query: string,
+    variables: string = '{}',
+    headers: string = '{}'
+): Snippets {
     // Parse to ensure valid JSON and remove formatting for compact payloads
-    let varsObj = {};
-    let headersObj = {
+    let varsObj: Record<string, unknown> = {};
+    let headersObj: Record<string, string> = {
         "Content-Type": "application/json",
         "Accept": "application/json"
     };
 
     try {
         if (variables && variables.trim()) {
-            varsObj = JSON.parse(variables);
+            const parsed = JSON.parse(variables);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                varsObj = parsed as Record<string, unknown>;
+            }
         }
-    } catch (e) {
+    } catch {
         // ignore
     }
 
     try {
         if (headers && headers.trim()) {
-            const h = JSON.parse(headers);
-            headersObj = { ...headersObj, ...h };
+            const parsed = JSON.parse(headers);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+                    headersObj[key] = String(value);
+                }
+            }
         }
-    } catch (e) {
+    } catch {
         // ignore
     }
 
@@ -41,7 +61,7 @@ export function generateSnippets(endpoint, query, variables = '{}', headers = '{
     };
 }
 
-function generateCurl(endpoint, headers, payload) {
+function generateCurl(endpoint: string, headers: Record<string, string>, payload: string): string {
     let snippet = `curl -X POST '${endpoint}' \\\n`;
     for (const [key, value] of Object.entries(headers)) {
         snippet += `  -H '${key}: ${value}' \\\n`;
@@ -50,7 +70,7 @@ function generateCurl(endpoint, headers, payload) {
     return snippet;
 }
 
-function generateJavaScript(endpoint, headers, payload) {
+function generateJavaScript(endpoint: string, headers: Record<string, string>, payload: string): string {
     return `const url = "${endpoint}";
 
 const headers = ${JSON.stringify(headers, null, 2)};
@@ -68,7 +88,7 @@ fetch(url, {
 `;
 }
 
-function generatePython(endpoint, headers, payload) {
+function generatePython(endpoint: string, headers: Record<string, string>, payload: string): string {
     return `import requests
 import json
 
@@ -84,7 +104,7 @@ print(response.json())
 `;
 }
 
-function generatePhp(endpoint, headers, payload) {
+function generatePhp(endpoint: string, headers: Record<string, string>, payload: string): string {
     let headerStrings = Object.entries(headers).map(([k, v]) => `"${k}: ${v}"`);
     let headerArray = `[\n    ${headerStrings.join(',\n    ')}\n]`;
 
@@ -117,7 +137,7 @@ if ($err) {
 `;
 }
 
-function generateCSharp(endpoint, headers, payload) {
+function generateCSharp(endpoint: string, headers: Record<string, string>, payload: string): string {
     return `using System;
 using System.Net.Http;
 using System.Net.Http.Headers;

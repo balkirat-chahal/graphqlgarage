@@ -1,10 +1,21 @@
+import {
+    GraphQLSchema,
+    GraphQLObjectType,
+    isObjectType,
+    GraphQLType,
+    GraphQLField,
+    isNonNullType,
+    isListType,
+} from 'graphql';
+import type * as Monaco from 'monaco-editor';
+
 /**
  * GraphQL Language Support for Monaco Editor
  * Provides syntax highlighting, auto-completion, and hover
  */
 
 // Monarch language definition for GraphQL syntax highlighting
-export const graphqlLanguageDef = {
+export const graphqlLanguageDef: Monaco.languages.IMonarchLanguage = {
     defaultToken: 'invalid',
     keywords: [
         'query', 'mutation', 'subscription', 'fragment', 'on', 'type',
@@ -85,7 +96,7 @@ export const graphqlLanguageDef = {
 };
 
 // Theme configurations
-export const graphqlDarkTheme = {
+export const graphqlDarkTheme: Monaco.editor.IStandaloneThemeData = {
     base: 'vs-dark',
     inherit: true,
     rules: [
@@ -127,7 +138,7 @@ export const graphqlDarkTheme = {
     },
 };
 
-export const graphqlLightTheme = {
+export const graphqlLightTheme: Monaco.editor.IStandaloneThemeData = {
     base: 'vs',
     inherit: true,
     rules: [
@@ -157,7 +168,7 @@ export const graphqlLightTheme = {
 /**
  * Register GraphQL language and themes in Monaco
  */
-export function registerGraphQLLanguage(monaco) {
+export function registerGraphQLLanguage(monaco: typeof import('monaco-editor')) {
     if (!monaco.languages.getLanguages().find((l) => l.id === 'graphql')) {
         monaco.languages.register({ id: 'graphql' });
         monaco.languages.setMonarchTokensProvider('graphql', graphqlLanguageDef);
@@ -170,7 +181,9 @@ export function registerGraphQLLanguage(monaco) {
 /**
  * Create an auto-complete provider for GraphQL based on introspected schema
  */
-export function createCompletionProvider(schema) {
+export function createCompletionProvider(
+    schema: GraphQLSchema | null
+): Monaco.languages.CompletionItemProvider | null {
     if (!schema) return null;
 
     const typeMap = schema.getTypeMap();
@@ -189,14 +202,14 @@ export function createCompletionProvider(schema) {
             });
 
             const word = model.getWordUntilPosition(position);
-            const range = {
+            const range: Monaco.IRange = {
                 startLineNumber: position.lineNumber,
                 startColumn: word.startColumn,
                 endLineNumber: position.lineNumber,
                 endColumn: word.endColumn,
             };
 
-            const suggestions = [];
+            const suggestions: Monaco.languages.CompletionItem[] = [];
 
             // Detect context
             const lines = textUntilPosition.split('\n');
@@ -230,7 +243,7 @@ export function createCompletionProvider(schema) {
                 } else if (braceDepth > 1) {
                     // Nested fields — try to find the enclosing type
                     const enclosingType = findEnclosingType(textUntilPosition, schema, queryType, mutationType, subscriptionType);
-                    if (enclosingType && typeof enclosingType.getFields === 'function') {
+                    if (enclosingType && isObjectType(enclosingType)) {
                         const fields = enclosingType.getFields();
                         for (const [name, field] of Object.entries(fields)) {
                             suggestions.push(makeFieldSuggestion(name, field, range));
@@ -316,7 +329,9 @@ export function createCompletionProvider(schema) {
 /**
  * Create a hover provider for GraphQL
  */
-export function createHoverProvider(schema) {
+export function createHoverProvider(
+    schema: GraphQLSchema | null
+): Monaco.languages.HoverProvider | null {
     if (!schema) return null;
 
     return {
@@ -335,7 +350,7 @@ export function createHoverProvider(schema) {
                 if (type.description) {
                     contents.push(type.description);
                 }
-                if (typeof type.getFields === 'function') {
+                if (isObjectType(type)) {
                     const fieldNames = Object.keys(type.getFields()).slice(0, 10);
                     contents.push('```graphql\n' + fieldNames.join(', ') + (fieldNames.length >= 10 ? ', ...' : '') + '\n```');
                 }
@@ -357,7 +372,7 @@ export function createHoverProvider(schema) {
 
 // ========== Helpers ==========
 
-function countChar(str, char) {
+function countChar(str: string, char: string): number {
     let count = 0;
     for (let i = 0; i < str.length; i++) {
         if (str[i] === char) count++;
@@ -365,7 +380,7 @@ function countChar(str, char) {
     return count;
 }
 
-function detectRootType(text, queryType, mutationType, subscriptionType) {
+function detectRootType(text: string, queryType: GraphQLObjectType | null | undefined, mutationType: GraphQLObjectType | null | undefined, subscriptionType: GraphQLObjectType | null | undefined): GraphQLObjectType | null | undefined {
     // Find the last operation keyword before the first brace
     const match = text.match(/(query|mutation|subscription)\b/g);
     if (!match) return queryType;
@@ -375,42 +390,37 @@ function detectRootType(text, queryType, mutationType, subscriptionType) {
     return queryType;
 }
 
-function findEnclosingType(text, schema, queryType, mutationType, subscriptionType) {
+function findEnclosingType(text: string, schema: GraphQLSchema, queryType: GraphQLObjectType | null | undefined, mutationType: GraphQLObjectType | null | undefined, subscriptionType: GraphQLObjectType | null | undefined): GraphQLType | null {
     // Simple approach: find the field names in the path from root to cursor
     const rootType = detectRootType(text, queryType, mutationType, subscriptionType);
     if (!rootType) return null;
 
     // Extract field names between braces
-    const segments = [];
-    let depth = 0;
     let currentField = '';
 
     const tokens = text.match(/[{}]|\b\w+\b/g) || [];
-    const fieldStack = [];
+    const fieldStack: string[] = [];
 
     for (const token of tokens) {
         if (token === '{') {
             if (currentField) {
                 fieldStack.push(currentField);
             }
-            depth++;
             currentField = '';
         } else if (token === '}') {
-            depth--;
             fieldStack.pop();
             currentField = '';
         } else if (
-            !['query', 'mutation', 'subscription', 'fragment', 'on', 'true', 'false', 'null'].includes(token) &&
-            depth > 0
+            !['query', 'mutation', 'subscription', 'fragment', 'on', 'true', 'false', 'null'].includes(token)
         ) {
             currentField = token;
         }
     }
 
     // walk the type tree
-    let currentType = rootType;
+    let currentType: GraphQLType | null = rootType;
     for (const fieldName of fieldStack) {
-        if (!currentType || typeof currentType.getFields !== 'function') return null;
+        if (!currentType || !isObjectType(currentType)) return null;
         const fields = currentType.getFields();
         const field = fields[fieldName];
         if (!field) return null;
@@ -420,25 +430,33 @@ function findEnclosingType(text, schema, queryType, mutationType, subscriptionTy
     return currentType;
 }
 
-function unwrapType(type) {
+function unwrapType(type: GraphQLType | null | undefined): GraphQLType | null {
     if (!type) return null;
-    if (type.ofType) return unwrapType(type.ofType);
+    if (isNonNullType(type) || isListType(type)) return unwrapType(type.ofType);
     return type;
 }
 
-function makeKeyword(label, range, doc) {
+function makeKeyword(
+    label: string,
+    range: Monaco.IRange,
+    doc: string
+): Monaco.languages.CompletionItem {
     return {
         label,
         kind: 14, // Keyword
         documentation: doc,
         insertText: `${label} {\n  $0\n}`,
-        insertTextRules: 4, // InsertAsSnippet
+        insertTextRules: Monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
         range,
         sortText: `0_${label}`,
     };
 }
 
-function makeFieldSuggestion(name, field, range) {
+function makeFieldSuggestion(
+    name: string,
+    field: GraphQLField<unknown, unknown>,
+    range: Monaco.IRange
+): Monaco.languages.CompletionItem {
     const type = field.type.toString();
     const hasArgs = field.args && field.args.length > 0;
     const hasSubFields = hasObjectSubFields(field.type);
@@ -446,7 +464,7 @@ function makeFieldSuggestion(name, field, range) {
     let insertText = name;
     if (hasArgs) {
         const requiredArgs = field.args.filter(
-            (a) => a.type.constructor.name === 'GraphQLNonNull'
+            (a) => isNonNullType(a.type)
         );
         if (requiredArgs.length > 0) {
             const argSnippets = requiredArgs.map(
@@ -465,13 +483,16 @@ function makeFieldSuggestion(name, field, range) {
         detail: type,
         documentation: field.description || '',
         insertText,
-        insertTextRules: hasSubFields || hasArgs ? 4 : 0,
+        insertTextRules:
+            hasSubFields || hasArgs
+                ? Monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                : Monaco.languages.CompletionItemInsertTextRule.None,
         range,
         sortText: `1_${name}`,
     };
 }
 
-function hasObjectSubFields(type) {
+function hasObjectSubFields(type: GraphQLType): boolean {
     const unwrapped = unwrapType(type);
-    return unwrapped && typeof unwrapped.getFields === 'function';
+    return !!unwrapped && isObjectType(unwrapped);
 }
