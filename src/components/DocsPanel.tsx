@@ -207,7 +207,7 @@ export default function DocsPanel({ activeView = 'docs', setActiveView }: DocsPa
     );
 
     const renderSidebarTabs = () => {
-        const isDocsActive = activeView === 'docs' || activeView === 'explore';
+        const isDocsActive = activeView === 'docs';
         return (
             <div className="flex items-center justify-between px-3 h-11 border-b shrink-0">
                 <div className="flex bg-muted/50 p-0.5 rounded-md gap-0.5">
@@ -221,6 +221,28 @@ export default function DocsPanel({ activeView = 'docs', setActiveView }: DocsPa
                         )}
                     >
                         Docs
+                    </button>
+                    <button
+                        onClick={() => setActiveView('explore')}
+                        className={cn(
+                            "px-3 py-1 text-[11px] font-semibold rounded-sm transition-all",
+                            activeView === 'explore'
+                                ? "bg-background text-foreground shadow-sm"
+                                : "text-muted-foreground hover:text-foreground"
+                        )}
+                    >
+                        Explore
+                    </button>
+                    <button
+                        onClick={() => setActiveView('types')}
+                        className={cn(
+                            "px-3 py-1 text-[11px] font-semibold rounded-sm transition-all",
+                            activeView === 'types'
+                                ? "bg-background text-foreground shadow-sm"
+                                : "text-muted-foreground hover:text-foreground"
+                        )}
+                    >
+                        Types
                     </button>
                     <button
                         onClick={() => setActiveView('schema')}
@@ -416,7 +438,7 @@ export default function DocsPanel({ activeView = 'docs', setActiveView }: DocsPa
                 </div>
             </div>
 
-            <ScrollArea className="flex-1">
+            <ScrollArea className="flex-1 min-h-0">
                 <Accordion type="multiple" defaultValue={['queries', 'mutations']} className="px-1">
                     {filteredDocs && (Object.entries(SECTION_CONFIG) as Array<[keyof SchemaDocs, (typeof SECTION_CONFIG)[keyof SchemaDocs]]>).map(([key, config]) => {
                         const items = filteredDocs[key];

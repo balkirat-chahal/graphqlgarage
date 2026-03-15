@@ -46,12 +46,34 @@ export default function SchemaViewer({ activeView = 'schema', setActiveView }: S
                         onClick={() => setActiveView('docs')}
                         className={cn(
                             "px-3 py-1 text-[11px] font-semibold rounded-sm transition-all",
-                            activeView === 'docs' || activeView === 'explore'
+                            activeView === 'docs'
                                 ? "bg-background text-foreground shadow-sm"
                                 : "text-muted-foreground hover:text-foreground"
                         )}
                     >
                         Docs
+                    </button>
+                    <button
+                        onClick={() => setActiveView('explore')}
+                        className={cn(
+                            "px-3 py-1 text-[11px] font-semibold rounded-sm transition-all",
+                            activeView === 'explore'
+                                ? "bg-background text-foreground shadow-sm"
+                                : "text-muted-foreground hover:text-foreground"
+                        )}
+                    >
+                        Explore
+                    </button>
+                    <button
+                        onClick={() => setActiveView('types')}
+                        className={cn(
+                            "px-3 py-1 text-[11px] font-semibold rounded-sm transition-all",
+                            activeView === 'types'
+                                ? "bg-background text-foreground shadow-sm"
+                                : "text-muted-foreground hover:text-foreground"
+                        )}
+                    >
+                        Types
                     </button>
                     <button
                         onClick={() => setActiveView('schema')}

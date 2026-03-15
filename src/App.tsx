@@ -12,6 +12,8 @@ import QueryEditor from '@/components/QueryEditor';
 import ResponsePanel from '@/components/ResponsePanel';
 import HistoryPanel from '@/components/HistoryPanel';
 import SchemaViewer from '@/components/SchemaViewer';
+import GraphExplorer from '@/components/GraphExplorer';
+import TypesPanel from '@/components/TypesPanel';
 import {
     Sun,
     Moon,
@@ -122,6 +124,9 @@ export default function App() {
             case 'history':
                 return <HistoryPanel />;
             case 'explore':
+                return <GraphExplorer activeView={activeView} setActiveView={setActiveView} />;
+            case 'types':
+                return <TypesPanel activeView={activeView} setActiveView={setActiveView} />;
             case 'docs':
             default:
                 return <DocsPanel activeView={activeView} setActiveView={setActiveView} />;

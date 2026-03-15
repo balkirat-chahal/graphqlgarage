@@ -1,1 +1,1 @@
-export type LeftPanelView = 'docs' | 'schema' | 'history' | 'explore'
+export type LeftPanelView = 'docs' | 'schema' | 'history' | 'explore' | 'types'

@@ -1,5 +1,5 @@
 import React, { useMemo, useCallback, useEffect } from 'react';
-import { Plus, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Plus, Trash2 } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,8 @@ import {
 type VariablesShape = Record<string, unknown>;
 type PathSegment = string | number;
 type Path = PathSegment[];
+
+const DEFAULT_EXPANDED_DEPTH = 3;
 
 interface VariableDefinitionInfo {
     name: string;
@@ -69,6 +71,11 @@ const areValuesEqual = (a: unknown, b: unknown): boolean => {
     }
     return false;
 };
+
+const getPathKey = (path: Path): string =>
+    path
+        .map((segment) => (typeof segment === 'number' ? `[${segment}]` : segment))
+        .join('.');
 
 function parseVariablesString(input: string): { value: VariablesShape; error?: string } {
     if (!input || !input.trim()) return { value: {} };
@@ -295,6 +302,7 @@ function applyVariableDefaultsToQuery(
 export default function ParametersPanel({ contextLabel }: ParametersPanelProps) {
     const store = useStore();
     const activeTab = store.getActiveTab();
+    const [expandedPaths, setExpandedPaths] = React.useState<Record<string, boolean>>({});
 
     const inlineVariables = useMemo(
         () => parseQueryVariables(activeTab.query, store.schema),
@@ -504,6 +512,9 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
         depth = 0
     ): React.ReactNode => {
         const resolvedType = isNonNullType(type) ? type.ofType : type;
+        const pathKey = getPathKey(path);
+        const shouldCollapse = depth >= DEFAULT_EXPANDED_DEPTH;
+        const isExpanded = !shouldCollapse || Boolean(expandedPaths[pathKey]);
         const selectClassName =
             "h-8 w-full rounded-md border border-input bg-background px-2 text-xs font-mono text-foreground shadow-sm focus:outline-none focus:ring-1 focus:ring-ring";
 
@@ -582,58 +593,104 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
                         depthStyles[depth % depthStyles.length]
                     )}
                 >
-                    {Object.values(fields).map((field) => {
-                        const fieldType = field.type as GraphQLInputType;
-                        const fieldHasValue = Object.prototype.hasOwnProperty.call(
-                            objectValue,
-                            field.name
-                        );
-                        return (
-                            <div key={field.name} className="space-y-1">
-                                <div className="flex items-center justify-between gap-2">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                        <span className="font-mono text-xs font-semibold truncate">
-                                            {field.name}
-                                        </span>
-                                        <Badge
-                                            variant="secondary"
-                                            className="h-4 px-1 text-[9px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
-                                        >
-                                            {getTypeString(fieldType)}
-                                        </Badge>
-                                        {isNonNullType(fieldType) && (
+                    {shouldCollapse && (
+                        <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                                <Badge
+                                    variant="secondary"
+                                    className="h-4 px-1 text-[9px] uppercase tracking-wider bg-slate-500/10 text-slate-200 border border-slate-500/30"
+                                >
+                                    Nested
+                                </Badge>
+                                <span className="text-[10px] text-muted-foreground font-mono">
+                                    {getTypeString(resolvedType)}
+                                </span>
+                                <span className="text-[10px] text-muted-foreground">
+                                    {Object.keys(fields).length} fields
+                                </span>
+                            </div>
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 px-2 text-[10px]"
+                                onClick={() =>
+                                    setExpandedPaths((prev) => ({
+                                        ...prev,
+                                        [pathKey]: !prev[pathKey],
+                                    }))
+                                }
+                            >
+                                {isExpanded ? (
+                                    <ChevronDown className="h-3 w-3 mr-1" />
+                                ) : (
+                                    <ChevronRight className="h-3 w-3 mr-1" />
+                                )}
+                                {isExpanded ? 'Collapse' : 'Expand'}
+                            </Button>
+                        </div>
+                    )}
+                    {!isExpanded ? (
+                        <div className="text-[11px] text-muted-foreground italic">
+                            Nested fields are collapsed. Expand to edit.
+                        </div>
+                    ) : Object.keys(fields).length === 0 ? (
+                        <div className="text-[11px] text-muted-foreground italic">
+                            No fields
+                        </div>
+                    ) : (
+                        Object.values(fields).map((field) => {
+                            const fieldType = field.type as GraphQLInputType;
+                            const fieldHasValue = Object.prototype.hasOwnProperty.call(
+                                objectValue,
+                                field.name
+                            );
+                            return (
+                                <div key={field.name} className="space-y-1">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <span className="font-mono text-xs font-semibold truncate">
+                                                {field.name}
+                                            </span>
                                             <Badge
                                                 variant="secondary"
-                                                className="h-4 px-1 text-[9px] uppercase tracking-wider bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                                                className="h-4 px-1 text-[9px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
                                             >
-                                                Required
+                                                {getTypeString(fieldType)}
                                             </Badge>
-                                        )}
+                                            {isNonNullType(fieldType) && (
+                                                <Badge
+                                                    variant="secondary"
+                                                    className="h-4 px-1 text-[9px] uppercase tracking-wider bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                                                >
+                                                    Required
+                                                </Badge>
+                                            )}
+                                        </div>
+                                        <button
+                                            className="text-muted-foreground hover:text-destructive transition-colors disabled:opacity-40"
+                                            onClick={() => handleRemoveValue(variableName, [...path, field.name])}
+                                            disabled={!fieldHasValue}
+                                            title="Remove field"
+                                        >
+                                            <Trash2 className="h-3 w-3" />
+                                        </button>
                                     </div>
-                                    <button
-                                        className="text-muted-foreground hover:text-destructive transition-colors disabled:opacity-40"
-                                        onClick={() => handleRemoveValue(variableName, [...path, field.name])}
-                                        disabled={!fieldHasValue}
-                                        title="Remove field"
-                                    >
-                                        <Trash2 className="h-3 w-3" />
-                                    </button>
+                                    {renderInputForType(
+                                        variableName,
+                                        fieldType,
+                                        objectValue[field.name],
+                                        [...path, field.name],
+                                        depth + 1
+                                    )}
+                                    {field.description && (
+                                        <p className="text-[10px] text-muted-foreground leading-relaxed">
+                                            {field.description}
+                                        </p>
+                                    )}
                                 </div>
-                                {renderInputForType(
-                                    variableName,
-                                    fieldType,
-                                    objectValue[field.name],
-                                    [...path, field.name],
-                                    depth + 1
-                                )}
-                                {field.description && (
-                                    <p className="text-[10px] text-muted-foreground leading-relaxed">
-                                        {field.description}
-                                    </p>
-                                )}
-                            </div>
-                        );
-                    })}
+                            );
+                        })
+                    )}
                 </div>
             );
         }
@@ -763,7 +820,7 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
                     </Badge>
                 )}
             </div>
-            <ScrollArea className="max-h-[35vh]" style={{ maxHeight: '35vh' }}>
+            <ScrollArea className="max-h-none">
                 <div className="p-3 space-y-3">
                     {variableError ? (
                         <div className="text-xs text-muted-foreground">
