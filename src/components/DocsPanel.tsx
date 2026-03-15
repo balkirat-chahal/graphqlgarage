@@ -206,11 +206,44 @@ export default function DocsPanel({ activeView = 'docs', setActiveView }: DocsPa
         </div>
     );
 
+    const renderSidebarTabs = () => {
+        const isDocsActive = activeView === 'docs' || activeView === 'explore';
+        return (
+            <div className="flex items-center justify-between px-3 h-11 border-b shrink-0">
+                <div className="flex bg-muted/50 p-0.5 rounded-md gap-0.5">
+                    <button
+                        onClick={() => setActiveView('docs')}
+                        className={cn(
+                            "px-3 py-1 text-[11px] font-semibold rounded-sm transition-all",
+                            isDocsActive
+                                ? "bg-background text-foreground shadow-sm"
+                                : "text-muted-foreground hover:text-foreground"
+                        )}
+                    >
+                        Docs
+                    </button>
+                    <button
+                        onClick={() => setActiveView('schema')}
+                        className={cn(
+                            "px-3 py-1 text-[11px] font-semibold rounded-sm transition-all",
+                            activeView === 'schema'
+                                ? "bg-background text-foreground shadow-sm"
+                                : "text-muted-foreground hover:text-foreground"
+                        )}
+                    >
+                        SDL
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
 
     // Field detail view
     if (selectedField) {
         return (
             <div className="flex flex-col h-full bg-card border-r">
+                {renderSidebarTabs()}
                 {renderBreadcrumbs()}
                 <ScrollArea className="flex-1">
                     <div className="p-4 space-y-6">
@@ -286,6 +319,7 @@ export default function DocsPanel({ activeView = 'docs', setActiveView }: DocsPa
 
         return (
             <div className="flex flex-col h-full bg-card border-r">
+                {renderSidebarTabs()}
                 {renderBreadcrumbs()}
                 <ScrollArea className="flex-1">
                     <div className="p-4 space-y-6">
@@ -369,6 +403,7 @@ export default function DocsPanel({ activeView = 'docs', setActiveView }: DocsPa
     // Main docs list view
     return (
         <div className="flex flex-col h-full bg-card border-r overflow-hidden">
+            {renderSidebarTabs()}
             <div className="p-3 border-b space-y-3 shrink-0">
                 <div className="relative group">
                     <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />

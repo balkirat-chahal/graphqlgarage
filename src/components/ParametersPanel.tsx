@@ -479,11 +479,20 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
         updateQueryWithVariables(base);
     }, [buildInlineVariablesBase, updateQueryWithVariables, variableError, panelError]);
 
-    const modeButtonClass = (active: boolean) =>
+    const depthStyles = [
+        "border-emerald-500/40 bg-emerald-500/5",
+        "border-sky-500/40 bg-sky-500/5",
+        "border-amber-500/40 bg-amber-500/5",
+        "border-purple-500/40 bg-purple-500/5",
+    ];
+
+    const modeButtonClass = (active: boolean, tone: 'inline' | 'panel') =>
         cn(
-            "h-6 px-2 text-[10px] font-semibold",
+            "h-6 px-2 text-[10px] font-semibold transition-colors",
             active
-                ? "bg-primary/20 text-primary"
+                ? tone === 'inline'
+                    ? "bg-emerald-500/20 text-emerald-300"
+                    : "bg-amber-500/20 text-amber-300"
                 : "text-muted-foreground hover:text-foreground"
         );
 
@@ -491,7 +500,8 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
         variableName: string,
         type: GraphQLInputType,
         value: unknown,
-        path: Path
+        path: Path,
+        depth = 0
     ): React.ReactNode => {
         const resolvedType = isNonNullType(type) ? type.ofType : type;
         const selectClassName =
@@ -502,15 +512,29 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
             const listValue = Array.isArray(value) ? value : [];
             return (
                 <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                        <span className="text-[11px] text-muted-foreground">Array</span>
+                    <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                            <Badge
+                                variant="secondary"
+                                className="h-4 px-1.5 text-[9px] uppercase tracking-wider bg-sky-500/15 text-sky-300 border border-sky-500/30"
+                            >
+                                List
+                            </Badge>
+                            <span className="text-[10px] text-muted-foreground font-mono">
+                                {getTypeString(itemType)}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground">
+                                {listValue.length} items
+                            </span>
+                        </div>
                         <Button
                             variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
+                            size="sm"
+                            className="h-7 px-2 text-[10px]"
                             onClick={() => handleAddArrayItem(variableName, path, itemType)}
                         >
-                            <Plus className="h-3 w-3" />
+                            <Plus className="h-3 w-3 mr-1" />
+                            Add item
                         </Button>
                     </div>
                     {listValue.length === 0 ? (
@@ -522,7 +546,10 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
                             {listValue.map((item, index) => (
                                 <div
                                     key={`${path.join('.')}-${index}`}
-                                    className="rounded-md border border-border/60 bg-muted/20 p-2 space-y-2"
+                                    className={cn(
+                                        "rounded-md border border-border/60 p-2 space-y-2",
+                                        depthStyles[(depth + 1) % depthStyles.length]
+                                    )}
                                 >
                                     <div className="flex items-center justify-between">
                                         <span className="text-[11px] text-muted-foreground font-mono">
@@ -536,7 +563,7 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
                                             <Trash2 className="h-3 w-3" />
                                         </button>
                                     </div>
-                                    {renderInputForType(variableName, itemType, item, [...path, index])}
+                                    {renderInputForType(variableName, itemType, item, [...path, index], depth + 1)}
                                 </div>
                             ))}
                         </div>
@@ -549,7 +576,12 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
             const objectValue = isRecord(value) ? value : {};
             const fields = resolvedType.getFields();
             return (
-                <div className="space-y-2 pl-3 border-l border-border/50">
+                <div
+                    className={cn(
+                        "space-y-2 pl-3 border-l-2 rounded-md p-2",
+                        depthStyles[depth % depthStyles.length]
+                    )}
+                >
                     {Object.values(fields).map((field) => {
                         const fieldType = field.type as GraphQLInputType;
                         const fieldHasValue = Object.prototype.hasOwnProperty.call(
@@ -563,13 +595,16 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
                                         <span className="font-mono text-xs font-semibold truncate">
                                             {field.name}
                                         </span>
-                                        <span className="text-[10px] text-muted-foreground font-mono truncate">
+                                        <Badge
+                                            variant="secondary"
+                                            className="h-4 px-1 text-[9px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
+                                        >
                                             {getTypeString(fieldType)}
-                                        </span>
+                                        </Badge>
                                         {isNonNullType(fieldType) && (
                                             <Badge
                                                 variant="secondary"
-                                                className="h-4 px-1 text-[9px] uppercase tracking-wider"
+                                                className="h-4 px-1 text-[9px] uppercase tracking-wider bg-rose-500/15 text-rose-300 border border-rose-500/30"
                                             >
                                                 Required
                                             </Badge>
@@ -588,7 +623,8 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
                                     variableName,
                                     fieldType,
                                     objectValue[field.name],
-                                    [...path, field.name]
+                                    [...path, field.name],
+                                    depth + 1
                                 )}
                                 {field.description && (
                                     <p className="text-[10px] text-muted-foreground leading-relaxed">
@@ -699,17 +735,20 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
         );
     };
 
-    return (
-        <div className="rounded-md border border-border/60 bg-card/30 overflow-hidden">
-            <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/20">
+        return (
+            <div className="rounded-md border border-border/60 bg-card/30 overflow-hidden shadow-sm">
+            <div className="flex items-center justify-between px-3 py-2 border-b bg-gradient-to-r from-primary/10 via-transparent to-transparent">
                 <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-primary">
                         Parameters
                     </span>
                     {contextLabel && (
-                        <span className="text-[11px] text-muted-foreground">
+                        <Badge
+                            variant="secondary"
+                            className="h-5 px-1.5 text-[10px] font-mono bg-muted/60"
+                        >
                             {contextLabel}
-                        </span>
+                        </Badge>
                     )}
                     <Badge
                         variant="secondary"
@@ -750,41 +789,47 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
                             return (
                                 <div
                                     key={definition.name}
-                                    className="space-y-2 rounded-md border border-border/60 bg-muted/10 p-3"
+                                    className="space-y-2 rounded-md border border-border/60 bg-gradient-to-br from-muted/20 via-card/40 to-card p-3 shadow-[0_0_0_1px_rgba(255,255,255,0.03)]"
                                 >
                                     <div className="flex items-center justify-between gap-2">
                                         <div className="flex items-center gap-2 min-w-0">
                                             <span className="font-mono text-xs font-semibold truncate">
                                                 {definition.name}
                                             </span>
-                                            <span className="text-[10px] text-muted-foreground font-mono truncate">
+                                            <Badge
+                                                variant="secondary"
+                                                className="h-4 px-1 text-[9px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
+                                            >
                                                 {definition.typeString}
-                                            </span>
+                                            </Badge>
                                             {definition.required && (
                                                 <Badge
                                                     variant="secondary"
-                                                    className="h-4 px-1 text-[9px] uppercase tracking-wider"
+                                                    className="h-4 px-1 text-[9px] uppercase tracking-wider bg-rose-500/15 text-rose-300 border border-rose-500/30"
                                                 >
                                                     Required
                                                 </Badge>
                                             )}
                                             {!hasValue && (
-                                                <span className="text-[10px] text-muted-foreground italic">
+                                                <Badge
+                                                    variant="secondary"
+                                                    className="h-4 px-1 text-[9px] uppercase tracking-wider bg-slate-500/10 text-slate-300 border border-slate-500/30"
+                                                >
                                                     Unset
-                                                </span>
+                                                </Badge>
                                             )}
                                         </div>
                                         <div className="flex items-center gap-2">
                                             <div className="inline-flex rounded-md border border-border/60 overflow-hidden">
                                                 <button
-                                                    className={modeButtonClass(mode === 'inline')}
+                                                    className={modeButtonClass(mode === 'inline', 'inline')}
                                                     onClick={() => handleSetVariableMode(definition, 'inline')}
                                                     title="Store in query"
                                                 >
                                                     Query
                                                 </button>
                                                 <button
-                                                    className={modeButtonClass(mode === 'panel')}
+                                                    className={modeButtonClass(mode === 'panel', 'panel')}
                                                     onClick={() => handleSetVariableMode(definition, 'panel')}
                                                     title="Store in variables panel"
                                                 >
@@ -805,7 +850,8 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
                                         definition.name,
                                         definition.type,
                                         effectiveValue,
-                                        [definition.name]
+                                        [definition.name],
+                                        0
                                     )}
                                 </div>
                             );
