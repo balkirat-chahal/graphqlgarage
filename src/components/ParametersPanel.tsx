@@ -13,13 +13,11 @@ import {
     GraphQLNamedType,
     GraphQLOutputType,
     GraphQLSchema,
-    GraphQLString,
     GraphQLType,
     Kind,
     astFromValue,
     isEnumType,
     isInputObjectType,
-    isInputType,
     isInterfaceType,
     isListType,
     isNonNullType,
@@ -28,12 +26,17 @@ import {
     isUnionType,
     parse,
     print,
-    typeFromAST,
     valueFromASTUntyped,
+    visit,
+    type ArgumentNode,
     type FieldNode,
     type InlineFragmentNode,
+    type NonNullTypeNode,
     type OperationDefinitionNode,
     type SelectionSetNode,
+    type TypeNode,
+    type VariableDefinitionNode,
+    type ValueNode,
 } from 'graphql';
 
 type VariablesShape = Record<string, unknown>;
@@ -43,17 +46,17 @@ type Path = PathSegment[];
 const DEFAULT_EXPANDED_DEPTH = 0;
 const DEFAULT_SELECTION_EXPANDED_DEPTH = 0;
 
-interface VariableDefinitionInfo {
+interface ParameterDefinitionInfo {
     name: string;
     type: GraphQLInputType;
     typeString: string;
     required: boolean;
 }
 
-interface InlineVariablesResult {
-    definitions: VariableDefinitionInfo[];
+interface InlineArgumentsResult {
     values: VariablesShape;
     error?: string;
+    missingRoot?: boolean;
 }
 
 interface ParametersPanelProps {
@@ -247,6 +250,34 @@ const unwrapOutputType = (type: GraphQLType): GraphQLNamedType => {
 const isObjectLikeType = (type: GraphQLNamedType): boolean =>
     isObjectType(type) || isInterfaceType(type) || isUnionType(type);
 
+const findRootFieldDefinition = (
+    schema: GraphQLSchema | null,
+    rootFieldName: string,
+    operationType?: 'query' | 'mutation' | 'subscription'
+): GraphQLField<unknown, unknown> | null => {
+    if (!schema || !rootFieldName) return null;
+    const rootTypes = operationType
+        ? [
+            operationType === 'mutation'
+                ? schema.getMutationType()
+                : operationType === 'subscription'
+                    ? schema.getSubscriptionType()
+                    : schema.getQueryType(),
+        ]
+        : [
+            schema.getQueryType(),
+            schema.getMutationType(),
+            schema.getSubscriptionType(),
+        ];
+    for (const rootType of rootTypes) {
+        const fields = rootType?.getFields();
+        if (fields && fields[rootFieldName]) {
+            return fields[rootFieldName];
+        }
+    }
+    return null;
+};
+
 const buildDefaultSelectionTree = (type: GraphQLOutputType): SelectionTree => {
     const named = unwrapOutputType(type);
     if (isUnionType(named)) {
@@ -410,111 +441,238 @@ function addArrayItemAtPath(variables: VariablesShape, path: Path, item: unknown
     return setVariablesAtPath(variables, path, nextArray);
 }
 
-function parseQueryVariables(query: string, schema: GraphQLSchema | null): InlineVariablesResult {
-    if (!schema) return { definitions: [], values: {} };
-    if (!query.trim()) return { definitions: [], values: {} };
+type NonNullAllowedTypeNode = Exclude<TypeNode, NonNullTypeNode>;
 
+function typeToASTNonNull(type: GraphQLInputType): NonNullAllowedTypeNode {
+    if (isNonNullType(type)) {
+        return typeToASTNonNull(type.ofType);
+    }
+    if (isListType(type)) {
+        return {
+            kind: Kind.LIST_TYPE,
+            type: typeToAST(type.ofType),
+        };
+    }
+    return {
+        kind: Kind.NAMED_TYPE,
+        name: {
+            kind: Kind.NAME,
+            value: type.name,
+        },
+    };
+}
+
+function typeToAST(type: GraphQLInputType): TypeNode {
+    if (isNonNullType(type)) {
+        return {
+            kind: Kind.NON_NULL_TYPE,
+            type: typeToASTNonNull(type.ofType),
+        };
+    }
+    if (isListType(type)) {
+        return {
+            kind: Kind.LIST_TYPE,
+            type: typeToAST(type.ofType),
+        };
+    }
+    return {
+        kind: Kind.NAMED_TYPE,
+        name: {
+            kind: Kind.NAME,
+            value: type.name,
+        },
+    };
+}
+
+function parseQueryArgumentValues(
+    query: string,
+    rootFieldName: string,
+    operationType?: 'query' | 'mutation' | 'subscription'
+): InlineArgumentsResult {
+    if (!query.trim() || !rootFieldName) return { values: {} };
+    try {
+        const doc = parse(query);
+        const match = findOperationWithField(doc, rootFieldName, operationType);
+        if (!match) {
+            return { values: {}, missingRoot: true };
+        }
+        const values: VariablesShape = {};
+        const args = match.field.arguments ?? [];
+        for (const argument of args) {
+            if (argument.value.kind === Kind.VARIABLE) continue;
+            values[argument.name.value] = valueFromASTUntyped(argument.value);
+        }
+        return { values };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : 'Invalid query.';
+        return { values: {}, error: message };
+    }
+}
+
+function parseQueryVariableDefinitionNames(query: string): { names: string[]; error?: string } {
+    if (!query.trim()) return { names: [] };
     try {
         const doc = parse(query);
         const operation = doc.definitions.find((def) => def.kind === 'OperationDefinition');
         if (!operation || operation.kind !== 'OperationDefinition') {
-            return { definitions: [], values: {} };
+            return { names: [] };
         }
-
-        const values: VariablesShape = {};
-        const definitions = (operation.variableDefinitions || [])
-            .map((definition) => {
-                const type = typeFromAST(schema, definition.type);
-                if (!type || !isInputType(type)) return null;
-                const name = definition.variable.name.value;
-                if (definition.defaultValue) {
-                    values[name] = valueFromASTUntyped(definition.defaultValue);
-                }
-                return {
-                    name,
-                    type: type as GraphQLInputType,
-                    typeString: getTypeString(type),
-                    required: isNonNullType(type),
-                } as VariableDefinitionInfo;
-            })
-            .filter((value): value is VariableDefinitionInfo => Boolean(value));
-
-        return { definitions, values };
+        const names = (operation.variableDefinitions ?? []).map(
+            (definition) => definition.variable.name.value
+        );
+        return { names };
     } catch (err) {
         const message = err instanceof Error ? err.message : 'Invalid query.';
-        return { definitions: [], values: {}, error: message };
+        return { names: [], error: message };
     }
 }
 
-function applyVariableDefaultsToQuery(
+function collectUsedVariables(operation: OperationDefinitionNode): Set<string> {
+    const used = new Set<string>();
+    visit(operation, {
+        VariableDefinition() {
+            return false;
+        },
+        Variable(node) {
+            used.add(node.name.value);
+            return;
+        },
+    });
+    return used;
+}
+
+function applyArgumentsToQuery(
     query: string,
-    schema: GraphQLSchema | null,
-    variables: VariablesShape
+    rootFieldName: string,
+    definitions: ParameterDefinitionInfo[],
+    inlineValues: VariablesShape,
+    panelModeNames: Set<string>,
+    operationType?: 'query' | 'mutation' | 'subscription'
 ): { next: string; error?: string } {
-    if (!schema || !query.trim()) return { next: query };
+    if (!query.trim() || !rootFieldName) return { next: query };
+    if (definitions.length === 0) return { next: query };
 
     try {
         const doc = parse(query);
-        let operationHandled = false;
-        let shouldUpdate = false;
+        const match = findOperationWithField(doc, rootFieldName, operationType);
+        if (!match) {
+            return { next: query };
+        }
 
-        for (const definition of doc.definitions) {
-            if (definition.kind !== 'OperationDefinition' || operationHandled) continue;
-            operationHandled = true;
-            if (!definition.variableDefinitions) break;
+        const { operation, operationIndex, field } = match;
+        const definitionMap = new Map(definitions.map((def) => [def.name, def]));
+        const existingArgs = new Map<string, ArgumentNode>(
+            (field.arguments ?? []).map((arg) => [arg.name.value, arg])
+        );
 
-            for (const variableDefinition of definition.variableDefinitions) {
-                const type = typeFromAST(schema, variableDefinition.type);
-                if (!type || !isInputType(type)) continue;
+        const nextArgs: ArgumentNode[] = [];
+        for (const definition of definitions) {
+            const name = definition.name;
+            const hasPanel = panelModeNames.has(name);
+            const hasInline = Object.prototype.hasOwnProperty.call(inlineValues, name);
 
-                const name = variableDefinition.variable.name.value;
-                const hasValue = Object.prototype.hasOwnProperty.call(variables, name);
-                const hasDefault = Boolean(variableDefinition.defaultValue);
-                const currentValue = hasDefault
-                    ? valueFromASTUntyped(variableDefinition.defaultValue!)
-                    : undefined;
-
-                if (!hasValue && hasDefault) {
-                    shouldUpdate = true;
-                    break;
+            let valueNode: ValueNode | null = null;
+            if (hasPanel) {
+                valueNode = {
+                    kind: Kind.VARIABLE,
+                    name: { kind: Kind.NAME, value: name },
+                };
+            } else if (hasInline) {
+                const inlineValue = inlineValues[name];
+                const astValue = astFromValue(inlineValue, definition.type);
+                if (astValue) {
+                    valueNode = astValue;
+                } else if (existingArgs.has(name)) {
+                    valueNode = existingArgs.get(name)!.value;
                 }
-                if (hasValue && !areValuesEqual(currentValue, variables[name])) {
-                    shouldUpdate = true;
-                    break;
-                }
+            }
+
+            if (valueNode) {
+                nextArgs.push({
+                    kind: Kind.ARGUMENT,
+                    name: { kind: Kind.NAME, value: name },
+                    value: valueNode,
+                });
             }
         }
 
-        if (!shouldUpdate) return { next: query };
-
-        operationHandled = false;
-        const nextDefinitions = doc.definitions.map((definition) => {
-            if (definition.kind !== 'OperationDefinition' || operationHandled) {
-                return definition;
+        for (const [name, argNode] of existingArgs.entries()) {
+            if (!definitionMap.has(name)) {
+                nextArgs.push(argNode);
             }
-            operationHandled = true;
-            if (!definition.variableDefinitions) return definition;
+        }
 
-            const nextVarDefs = definition.variableDefinitions.map((variableDefinition) => {
-                const type = typeFromAST(schema, variableDefinition.type);
-                if (!type || !isInputType(type)) return variableDefinition;
+        const nextField: FieldNode = {
+            ...field,
+            arguments: nextArgs.length > 0 ? nextArgs : undefined,
+        };
 
-                const name = variableDefinition.variable.name.value;
-                const hasValue = Object.prototype.hasOwnProperty.call(variables, name);
-
-                if (!hasValue) {
-                    if (!variableDefinition.defaultValue) return variableDefinition;
-                    return { ...variableDefinition, defaultValue: undefined };
-                }
-
-                const value = variables[name];
-                const astValue = astFromValue(value, type as GraphQLInputType);
-                if (!astValue) return variableDefinition;
-                return { ...variableDefinition, defaultValue: astValue };
-            });
-
-            return { ...definition, variableDefinitions: nextVarDefs };
+        const nextSelections = operation.selectionSet.selections.map((selection) => {
+            if (selection.kind !== Kind.FIELD || selection.name.value !== rootFieldName) {
+                return selection;
+            }
+            return nextField;
         });
+
+        const nextOperationBase: OperationDefinitionNode = {
+            ...operation,
+            selectionSet: {
+                ...operation.selectionSet,
+                selections: nextSelections,
+            },
+        };
+
+        const usedVariables = collectUsedVariables(nextOperationBase);
+        const existingVarDefs = nextOperationBase.variableDefinitions ?? [];
+        const nextVarDefs: VariableDefinitionNode[] = [];
+        const seen = new Set<string>();
+
+        for (const varDef of existingVarDefs) {
+            const name = varDef.variable.name.value;
+            const managed = definitionMap.get(name);
+            if (!managed) {
+                nextVarDefs.push(varDef);
+                seen.add(name);
+                continue;
+            }
+
+            if (panelModeNames.has(name)) {
+                nextVarDefs.push({
+                    ...varDef,
+                    type: typeToAST(managed.type),
+                    defaultValue: undefined,
+                });
+                seen.add(name);
+                continue;
+            }
+
+            if (usedVariables.has(name)) {
+                nextVarDefs.push(varDef);
+                seen.add(name);
+            }
+        }
+
+        for (const definition of definitions) {
+            if (!panelModeNames.has(definition.name)) continue;
+            if (seen.has(definition.name)) continue;
+            nextVarDefs.push({
+                kind: Kind.VARIABLE_DEFINITION,
+                variable: {
+                    kind: Kind.VARIABLE,
+                    name: { kind: Kind.NAME, value: definition.name },
+                },
+                type: typeToAST(definition.type),
+                defaultValue: undefined,
+            });
+        }
+
+        const nextOperation: OperationDefinitionNode = {
+            ...nextOperationBase,
+            variableDefinitions: nextVarDefs.length > 0 ? nextVarDefs : undefined,
+        };
+
+        const nextDefinitions = [...doc.definitions];
+        nextDefinitions[operationIndex] = nextOperation;
 
         // Cast definitions to any to satisfy TypeScript's readonly DefinitionNode[] expectation
         return { next: print({ ...doc, definitions: nextDefinitions as any }) };
@@ -627,34 +785,16 @@ export default function ParametersPanel({
     const [selectionExpandedPaths, setSelectionExpandedPaths] = React.useState<Record<string, boolean>>({});
     const rootFieldName = field?.name ?? contextLabel ?? '';
 
-    const rootFieldType = useMemo(() => {
-        if (field) return field.type;
-        if (!store.schema || !rootFieldName) return null;
-        const rootTypes = operationType
-            ? [
-                operationType === 'mutation'
-                    ? store.schema.getMutationType()
-                    : operationType === 'subscription'
-                        ? store.schema.getSubscriptionType()
-                        : store.schema.getQueryType(),
-            ]
-            : [
-                store.schema.getQueryType(),
-                store.schema.getMutationType(),
-                store.schema.getSubscriptionType(),
-            ];
-        for (const rootType of rootTypes) {
-            const fields = rootType?.getFields();
-            if (fields && fields[rootFieldName]) {
-                return fields[rootFieldName].type;
-            }
-        }
-        return null;
-    }, [field, operationType, rootFieldName, store.schema]);
+    const rootFieldDefinition = useMemo(
+        () => field ?? findRootFieldDefinition(store.schema, rootFieldName, operationType),
+        [field, operationType, rootFieldName, store.schema]
+    );
+
+    const rootFieldType = rootFieldDefinition?.type ?? null;
 
     const selectionState = useMemo(
-        () => parseQuerySelectionTree(activeTab.query, rootFieldName),
-        [activeTab.query, rootFieldName]
+        () => parseQuerySelectionTree(activeTab.query, rootFieldName, operationType),
+        [activeTab.query, operationType, rootFieldName]
     );
     const selectionTree = selectionState.tree;
     const selectionError = selectionState.error;
@@ -667,13 +807,30 @@ export default function ParametersPanel({
     const selectionSupported = rootNamedType ? isObjectLikeType(rootNamedType) : false;
     const selectionCount = useMemo(() => countSelections(selectionTree), [selectionTree]);
 
-    const inlineVariables = useMemo(
-        () => parseQueryVariables(activeTab.query, store.schema),
-        [activeTab.query, store.schema]
+    const parameterDefinitions = useMemo(() => {
+        const args = rootFieldDefinition?.args ?? [];
+        return args.map((arg) => ({
+            name: arg.name,
+            type: arg.type as GraphQLInputType,
+            typeString: getTypeString(arg.type),
+            required: isNonNullType(arg.type),
+        }));
+    }, [rootFieldDefinition]);
+
+    const inlineArguments = useMemo(
+        () => parseQueryArgumentValues(activeTab.query, rootFieldName, operationType),
+        [activeTab.query, operationType, rootFieldName]
     );
-    const variableDefinitions = inlineVariables.definitions;
-    const inlineValues = inlineVariables.values;
-    const variableError = inlineVariables.error;
+    const inlineArgumentValues = inlineArguments.values;
+    const argumentError = inlineArguments.error;
+    const argumentMissingRoot = inlineArguments.missingRoot;
+
+    const variableDefinitionState = useMemo(
+        () => parseQueryVariableDefinitionNames(activeTab.query),
+        [activeTab.query]
+    );
+    const variableDefinitionNames = variableDefinitionState.names;
+    const variableDefinitionError = variableDefinitionState.error;
 
     const panelState = useMemo(
         () => parseVariablesString(activeTab.variables),
@@ -682,27 +839,44 @@ export default function ParametersPanel({
     const panelValues = panelState.value;
     const panelError = panelState.error;
 
-    const variableModes = useMemo(() => {
+    const parameterModes = useMemo(() => {
         const modes: Record<string, 'inline' | 'panel'> = {};
-        for (const definition of variableDefinitions) {
+        for (const definition of parameterDefinitions) {
             modes[definition.name] = Object.prototype.hasOwnProperty.call(panelValues, definition.name)
                 ? 'panel'
                 : 'inline';
         }
         return modes;
-    }, [panelValues, variableDefinitions]);
+    }, [panelValues, parameterDefinitions]);
 
-    const updateQueryWithVariables = useCallback(
-        (nextVariables: VariablesShape) => {
-            const { next } = applyVariableDefaultsToQuery(
+    const updateQueryWithParameters = useCallback(
+        (nextInlineValues: VariablesShape, nextPanelValues?: VariablesShape) => {
+            const panelSource = nextPanelValues ?? panelValues;
+            const panelModeNames = new Set(
+                Object.keys(panelSource).filter((name) =>
+                    parameterDefinitions.some((definition) => definition.name === name)
+                )
+            );
+            const { next } = applyArgumentsToQuery(
                 activeTab.query,
-                store.schema,
-                nextVariables
+                rootFieldName,
+                parameterDefinitions,
+                nextInlineValues,
+                panelModeNames,
+                operationType
             );
             if (next === activeTab.query) return;
             store.updateTab(activeTab.id, { query: next });
         },
-        [activeTab.id, activeTab.query, store, store.schema]
+        [
+            activeTab.id,
+            activeTab.query,
+            operationType,
+            panelValues,
+            parameterDefinitions,
+            rootFieldName,
+            store,
+        ]
     );
 
     const updateVariablesPanel = useCallback(
@@ -714,26 +888,26 @@ export default function ParametersPanel({
         [activeTab.id, activeTab.variables, store]
     );
 
-    const buildInlineVariablesBase = useCallback(() => {
+    const buildInlineArgumentsBase = useCallback(() => {
         const base: VariablesShape = {};
-        for (const definition of variableDefinitions) {
-            const mode = variableModes[definition.name] ?? 'inline';
+        for (const definition of parameterDefinitions) {
+            const mode = parameterModes[definition.name] ?? 'inline';
             if (mode !== 'inline') continue;
-            if (Object.prototype.hasOwnProperty.call(inlineValues, definition.name)) {
-                base[definition.name] = inlineValues[definition.name];
+            if (Object.prototype.hasOwnProperty.call(inlineArgumentValues, definition.name)) {
+                base[definition.name] = inlineArgumentValues[definition.name];
             }
         }
         return base;
-    }, [inlineValues, variableDefinitions, variableModes]);
+    }, [inlineArgumentValues, parameterDefinitions, parameterModes]);
 
-    const setInlineVariablesWith = useCallback(
+    const setInlineArgumentsWith = useCallback(
         (updater: (current: VariablesShape) => VariablesShape) => {
-            if (variableError) return;
-            const base = buildInlineVariablesBase();
+            if (argumentError) return;
+            const base = buildInlineArgumentsBase();
             const next = updater(base);
-            updateQueryWithVariables(next);
+            updateQueryWithParameters(next);
         },
-        [buildInlineVariablesBase, updateQueryWithVariables, variableError]
+        [argumentError, buildInlineArgumentsBase, updateQueryWithParameters]
     );
 
     const setPanelVariablesWith = useCallback(
@@ -747,86 +921,87 @@ export default function ParametersPanel({
 
     const handleSetValue = useCallback(
         (name: string, path: Path, value: unknown) => {
-            const mode = variableModes[name] ?? 'inline';
+            const mode = parameterModes[name] ?? 'inline';
             if (mode === 'panel') {
                 setPanelVariablesWith((current) => setVariablesAtPath(current, path, value));
             } else {
-                setInlineVariablesWith((current) => setVariablesAtPath(current, path, value));
+                setInlineArgumentsWith((current) => setVariablesAtPath(current, path, value));
             }
         },
-        [setInlineVariablesWith, setPanelVariablesWith, variableModes]
+        [parameterModes, setInlineArgumentsWith, setPanelVariablesWith]
     );
 
     const handleRemoveValue = useCallback(
         (name: string, path: Path) => {
-            const mode = variableModes[name] ?? 'inline';
+            const mode = parameterModes[name] ?? 'inline';
             if (mode === 'panel') {
                 setPanelVariablesWith((current) => removeVariablesAtPath(current, path));
             } else {
-                setInlineVariablesWith((current) => removeVariablesAtPath(current, path));
+                setInlineArgumentsWith((current) => removeVariablesAtPath(current, path));
             }
         },
-        [setInlineVariablesWith, setPanelVariablesWith, variableModes]
+        [parameterModes, setInlineArgumentsWith, setPanelVariablesWith]
     );
 
     const handleAddArrayItem = useCallback(
         (name: string, path: Path, itemType: GraphQLInputType) => {
             const newItem = getDefaultValueForType(itemType);
-            const mode = variableModes[name] ?? 'inline';
+            const mode = parameterModes[name] ?? 'inline';
             if (mode === 'panel') {
                 setPanelVariablesWith((current) => addArrayItemAtPath(current, path, newItem));
             } else {
-                setInlineVariablesWith((current) => addArrayItemAtPath(current, path, newItem));
+                setInlineArgumentsWith((current) => addArrayItemAtPath(current, path, newItem));
             }
         },
-        [setInlineVariablesWith, setPanelVariablesWith, variableModes]
+        [parameterModes, setInlineArgumentsWith, setPanelVariablesWith]
     );
 
     const handleRemoveArrayItem = useCallback(
         (name: string, path: Path, index: number) => {
-            const mode = variableModes[name] ?? 'inline';
+            const mode = parameterModes[name] ?? 'inline';
             if (mode === 'panel') {
                 setPanelVariablesWith((current) => removeVariablesAtPath(current, [...path, index]));
             } else {
-                setInlineVariablesWith((current) => removeVariablesAtPath(current, [...path, index]));
+                setInlineArgumentsWith((current) => removeVariablesAtPath(current, [...path, index]));
             }
         },
-        [setInlineVariablesWith, setPanelVariablesWith, variableModes]
+        [parameterModes, setInlineArgumentsWith, setPanelVariablesWith]
     );
 
     const handleSetVariableMode = useCallback(
-        (definition: VariableDefinitionInfo, targetMode: 'inline' | 'panel') => {
+        (definition: ParameterDefinitionInfo, targetMode: 'inline' | 'panel') => {
             const name = definition.name;
-            const currentMode = variableModes[name] ?? 'inline';
+            const currentMode = parameterModes[name] ?? 'inline';
             if (currentMode === targetMode) return;
 
             const panelHas = Object.prototype.hasOwnProperty.call(panelValues, name);
-            const inlineHas = Object.prototype.hasOwnProperty.call(inlineValues, name);
+            const inlineHas = Object.prototype.hasOwnProperty.call(inlineArgumentValues, name);
             const fallback = getDefaultValueForType(definition.type);
 
             if (targetMode === 'panel') {
-                const nextValue = inlineHas ? inlineValues[name] : fallback;
-                setPanelVariablesWith((current) =>
-                    setVariablesAtPath(current, [name], nextValue)
-                );
-                const base = buildInlineVariablesBase();
+                const nextValue = inlineHas ? inlineArgumentValues[name] : fallback;
+                const nextPanel = setVariablesAtPath(panelValues, [name], nextValue);
+                updateVariablesPanel(nextPanel);
+
+                const base = buildInlineArgumentsBase();
                 const nextInline = removeVariablesAtPath(base, [name]);
-                updateQueryWithVariables(nextInline);
+                updateQueryWithParameters(nextInline, nextPanel);
             } else {
                 const nextValue = panelHas ? panelValues[name] : fallback;
-                const base = buildInlineVariablesBase();
+                const base = buildInlineArgumentsBase();
                 const nextInline = setVariablesAtPath(base, [name], nextValue);
-                updateQueryWithVariables(nextInline);
-                setPanelVariablesWith((current) => removeVariablesAtPath(current, [name]));
+                const nextPanel = removeVariablesAtPath(panelValues, [name]);
+                updateVariablesPanel(nextPanel);
+                updateQueryWithParameters(nextInline, nextPanel);
             }
         },
         [
-            buildInlineVariablesBase,
-            inlineValues,
+            buildInlineArgumentsBase,
+            inlineArgumentValues,
             panelValues,
-            setPanelVariablesWith,
-            updateQueryWithVariables,
-            variableModes,
+            parameterModes,
+            updateQueryWithParameters,
+            updateVariablesPanel,
         ]
     );
 
@@ -837,12 +1012,13 @@ export default function ParametersPanel({
                 activeTab.query,
                 rootFieldName,
                 nextTree,
-                rootFieldType
+                rootFieldType,
+                operationType
             );
             if (next === activeTab.query) return;
             store.updateTab(activeTab.id, { query: next });
         },
-        [activeTab.id, activeTab.query, rootFieldName, rootFieldType, store]
+        [activeTab.id, activeTab.query, operationType, rootFieldName, rootFieldType, store]
     );
 
     const handleToggleSelection = useCallback(
@@ -862,8 +1038,8 @@ export default function ParametersPanel({
     );
 
     useEffect(() => {
-        if (variableError || panelError) return;
-        const allowed = new Set(variableDefinitions.map((def) => def.name));
+        if (argumentError || panelError || variableDefinitionError) return;
+        const allowed = new Set(variableDefinitionNames);
         const sanitized: VariablesShape = {};
         for (const [key, value] of Object.entries(panelValues)) {
             if (allowed.has(key)) {
@@ -873,13 +1049,20 @@ export default function ParametersPanel({
         if (!areValuesEqual(sanitized, panelValues)) {
             updateVariablesPanel(sanitized);
         }
-    }, [panelError, panelValues, updateVariablesPanel, variableDefinitions, variableError]);
+    }, [
+        argumentError,
+        panelError,
+        panelValues,
+        updateVariablesPanel,
+        variableDefinitionError,
+        variableDefinitionNames,
+    ]);
 
     useEffect(() => {
-        if (variableError || panelError) return;
-        const base = buildInlineVariablesBase();
-        updateQueryWithVariables(base);
-    }, [buildInlineVariablesBase, updateQueryWithVariables, variableError, panelError]);
+        if (argumentError || panelError) return;
+        const base = buildInlineArgumentsBase();
+        updateQueryWithParameters(base);
+    }, [argumentError, buildInlineArgumentsBase, panelError, updateQueryWithParameters]);
 
     const depthStyles = [
         "border-emerald-500/40 bg-emerald-500/5",
@@ -1387,7 +1570,7 @@ export default function ParametersPanel({
     };
 
     const renderParametersContent = () => {
-        if (variableError) {
+        if (argumentError) {
             return (
                 <div className="text-xs text-muted-foreground">
                     Fix the query syntax to load the parameter builder.
@@ -1401,16 +1584,23 @@ export default function ParametersPanel({
                 </div>
             );
         }
-        if (variableDefinitions.length === 0) {
+        if (argumentMissingRoot) {
             return (
                 <div className="text-xs text-muted-foreground">
-                    No parameters in the current operation.
+                    Add this field to the query to edit its parameters.
                 </div>
             );
         }
-        return variableDefinitions.map((definition) => {
-            const mode = variableModes[definition.name] ?? 'inline';
-            const sourceValues = mode === 'panel' ? panelValues : inlineValues;
+        if (parameterDefinitions.length === 0) {
+            return (
+                <div className="text-xs text-muted-foreground">
+                    This field has no parameters.
+                </div>
+            );
+        }
+        return parameterDefinitions.map((definition) => {
+            const mode = parameterModes[definition.name] ?? 'inline';
+            const sourceValues = mode === 'panel' ? panelValues : inlineArgumentValues;
             const hasValue = Object.prototype.hasOwnProperty.call(
                 sourceValues,
                 definition.name
