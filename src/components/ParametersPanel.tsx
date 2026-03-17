@@ -1,5 +1,5 @@
 import React, { useMemo, useCallback, useEffect } from 'react';
-import { ChevronDown, ChevronRight, Plus, Trash2 } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Plus, Trash2 } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,26 +8,40 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from '@/lib/utils';
 import { getTypeString } from '@/lib/introspection';
 import {
+    GraphQLField,
     GraphQLInputType,
+    GraphQLNamedType,
+    GraphQLOutputType,
     GraphQLSchema,
+    GraphQLString,
+    GraphQLType,
+    Kind,
     astFromValue,
     isEnumType,
     isInputObjectType,
     isInputType,
+    isInterfaceType,
     isListType,
     isNonNullType,
+    isObjectType,
     isScalarType,
+    isUnionType,
     parse,
     print,
     typeFromAST,
     valueFromASTUntyped,
+    type FieldNode,
+    type InlineFragmentNode,
+    type OperationDefinitionNode,
+    type SelectionSetNode,
 } from 'graphql';
 
 type VariablesShape = Record<string, unknown>;
 type PathSegment = string | number;
 type Path = PathSegment[];
 
-const DEFAULT_EXPANDED_DEPTH = 3;
+const DEFAULT_EXPANDED_DEPTH = 0;
+const DEFAULT_SELECTION_EXPANDED_DEPTH = 0;
 
 interface VariableDefinitionInfo {
     name: string;
@@ -44,6 +58,8 @@ interface InlineVariablesResult {
 
 interface ParametersPanelProps {
     contextLabel?: string;
+    field?: GraphQLField<unknown, unknown>;
+    operationType?: 'query' | 'mutation' | 'subscription';
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -76,6 +92,214 @@ const getPathKey = (path: Path): string =>
     path
         .map((segment) => (typeof segment === 'number' ? `[${segment}]` : segment))
         .join('.');
+
+type SelectionTree = {
+    fields: Record<string, SelectionTree>;
+    fragments: Record<string, SelectionTree>;
+};
+
+const createSelectionTree = (): SelectionTree => ({ fields: {}, fragments: {} });
+
+const isSelectionTreeEmpty = (tree: SelectionTree): boolean =>
+    Object.keys(tree.fields).length === 0 && Object.keys(tree.fragments).length === 0;
+
+const selectionSetToTree = (selectionSet?: SelectionSetNode): SelectionTree => {
+    if (!selectionSet) return createSelectionTree();
+    const tree = createSelectionTree();
+    for (const selection of selectionSet.selections) {
+        if (selection.kind === Kind.FIELD) {
+            tree.fields[selection.name.value] = selectionSetToTree(selection.selectionSet);
+        } else if (selection.kind === Kind.INLINE_FRAGMENT && selection.typeCondition) {
+            tree.fragments[selection.typeCondition.name.value] = selectionSetToTree(selection.selectionSet);
+        }
+    }
+    return tree;
+};
+
+const treeToSelectionSet = (tree: SelectionTree): SelectionSetNode => {
+    const selections: Array<FieldNode | InlineFragmentNode> = [];
+    for (const [name, subtree] of Object.entries(tree.fields)) {
+        selections.push({
+            kind: Kind.FIELD,
+            name: { kind: Kind.NAME, value: name },
+            selectionSet: isSelectionTreeEmpty(subtree) ? undefined : treeToSelectionSet(subtree),
+        });
+    }
+    for (const [typeName, subtree] of Object.entries(tree.fragments)) {
+        if (isSelectionTreeEmpty(subtree)) continue;
+        selections.push({
+            kind: Kind.INLINE_FRAGMENT,
+            typeCondition: {
+                kind: Kind.NAMED_TYPE,
+                name: { kind: Kind.NAME, value: typeName },
+            },
+            selectionSet: treeToSelectionSet(subtree),
+        });
+    }
+    return { kind: Kind.SELECTION_SET, selections };
+};
+
+const isSelectionPathSelected = (tree: SelectionTree, path: Path): boolean => {
+    let current = tree;
+    for (const segment of path) {
+        if (typeof segment !== 'string') return false;
+        if (segment.startsWith('__on:')) {
+            const typeName = segment.slice(5);
+            const next = current.fragments[typeName];
+            if (!next) return false;
+            current = next;
+            continue;
+        }
+        const next = current.fields[segment];
+        if (!next) return false;
+        current = next;
+    }
+    return true;
+};
+
+const addSelectionPath = (
+    tree: SelectionTree,
+    path: Path,
+    leafTree: SelectionTree = createSelectionTree()
+): SelectionTree => {
+    if (path.length === 0) return tree;
+    const [head, ...rest] = path;
+    if (typeof head !== 'string') return tree;
+
+    if (head.startsWith('__on:')) {
+        const typeName = head.slice(5);
+        const current = tree.fragments[typeName] ?? createSelectionTree();
+        const next =
+            rest.length === 0
+                ? leafTree
+                : addSelectionPath(current, rest, leafTree);
+        return {
+            ...tree,
+            fragments: {
+                ...tree.fragments,
+                [typeName]: next,
+            },
+        };
+    }
+
+    const current = tree.fields[head] ?? createSelectionTree();
+    const next =
+        rest.length === 0
+            ? leafTree
+            : addSelectionPath(current, rest, leafTree);
+    return {
+        ...tree,
+        fields: {
+            ...tree.fields,
+            [head]: next,
+        },
+    };
+};
+
+const removeSelectionPath = (tree: SelectionTree, path: Path): SelectionTree => {
+    if (path.length === 0) return tree;
+    const [head, ...rest] = path;
+    if (typeof head !== 'string') return tree;
+
+    if (head.startsWith('__on:')) {
+        const typeName = head.slice(5);
+        const current = tree.fragments[typeName];
+        if (!current) return tree;
+        if (rest.length === 0) {
+            const nextFragments = { ...tree.fragments };
+            delete nextFragments[typeName];
+            return { ...tree, fragments: nextFragments };
+        }
+        const nextChild = removeSelectionPath(current, rest);
+        const nextFragments = { ...tree.fragments };
+        if (isSelectionTreeEmpty(nextChild)) {
+            delete nextFragments[typeName];
+        } else {
+            nextFragments[typeName] = nextChild;
+        }
+        return { ...tree, fragments: nextFragments };
+    }
+
+    const current = tree.fields[head];
+    if (!current) return tree;
+    if (rest.length === 0) {
+        const nextFields = { ...tree.fields };
+        delete nextFields[head];
+        return { ...tree, fields: nextFields };
+    }
+    const nextChild = removeSelectionPath(current, rest);
+    const nextFields = { ...tree.fields };
+    if (isSelectionTreeEmpty(nextChild)) {
+        delete nextFields[head];
+    } else {
+        nextFields[head] = nextChild;
+    }
+    return { ...tree, fields: nextFields };
+};
+
+const unwrapOutputType = (type: GraphQLType): GraphQLNamedType => {
+    if (isNonNullType(type) || isListType(type)) {
+        return unwrapOutputType(type.ofType);
+    }
+    return type as GraphQLNamedType;
+};
+
+const isObjectLikeType = (type: GraphQLNamedType): boolean =>
+    isObjectType(type) || isInterfaceType(type) || isUnionType(type);
+
+const buildDefaultSelectionTree = (type: GraphQLOutputType): SelectionTree => {
+    const named = unwrapOutputType(type);
+    if (isUnionType(named)) {
+        return {
+            fields: { __typename: createSelectionTree() },
+            fragments: {},
+        };
+    }
+    if (isObjectType(named) || isInterfaceType(named)) {
+        const tree = createSelectionTree();
+        const fields = Object.values(named.getFields());
+        const leafFields = fields.filter((field) => {
+            const base = unwrapOutputType(field.type);
+            return !isObjectLikeType(base);
+        });
+        const selected = leafFields.slice(0, 5);
+        if (selected.length === 0) {
+            tree.fields.__typename = createSelectionTree();
+        } else {
+            selected.forEach((field) => {
+                tree.fields[field.name] = createSelectionTree();
+            });
+        }
+        return tree;
+    }
+    return createSelectionTree();
+};
+
+const ensureNonEmptySelection = (
+    tree: SelectionTree,
+    type: GraphQLOutputType | null
+): SelectionTree => {
+    if (!type) return tree;
+    const named = unwrapOutputType(type);
+    if (!isObjectLikeType(named)) return tree;
+    if (!isSelectionTreeEmpty(tree)) return tree;
+    return {
+        fields: { __typename: createSelectionTree() },
+        fragments: {},
+    };
+};
+
+const countSelections = (tree: SelectionTree): number => {
+    const fieldCount = Object.values(tree.fields).reduce(
+        (acc, child) => acc + 1 + countSelections(child),
+        0
+    );
+    const fragmentCount = Object.values(tree.fragments).reduce(
+        (acc, child) => acc + countSelections(child),
+        0
+    );
+    return fieldCount + fragmentCount;
+};
 
 function parseVariablesString(input: string): { value: VariablesShape; error?: string } {
     if (!input || !input.trim()) return { value: {} };
@@ -292,17 +516,156 @@ function applyVariableDefaultsToQuery(
             return { ...definition, variableDefinitions: nextVarDefs };
         });
 
-        return { next: print({ ...doc, definitions: nextDefinitions }) };
+        // Cast definitions to any to satisfy TypeScript's readonly DefinitionNode[] expectation
+        return { next: print({ ...doc, definitions: nextDefinitions as any }) };
     } catch (err) {
         const message = err instanceof Error ? err.message : 'Invalid query.';
         return { next: query, error: message };
     }
 }
 
-export default function ParametersPanel({ contextLabel }: ParametersPanelProps) {
+function parseQuerySelectionTree(
+    query: string,
+    rootFieldName: string,
+    operationType?: 'query' | 'mutation' | 'subscription'
+): { tree: SelectionTree; error?: string; missingRoot?: boolean } {
+    if (!query.trim() || !rootFieldName) {
+        return { tree: createSelectionTree() };
+    }
+    try {
+        const doc = parse(query);
+        const match = findOperationWithField(doc, rootFieldName, operationType);
+        if (!match) {
+            return { tree: createSelectionTree(), missingRoot: true };
+        }
+        return { tree: selectionSetToTree(match.field.selectionSet) };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : 'Invalid query.';
+        return { tree: createSelectionTree(), error: message };
+    }
+}
+
+function applySelectionTreeToQuery(
+    query: string,
+    rootFieldName: string,
+    tree: SelectionTree,
+    rootFieldType: GraphQLOutputType | null,
+    operationType?: 'query' | 'mutation' | 'subscription'
+): { next: string; error?: string } {
+    if (!query.trim() || !rootFieldName) return { next: query };
+    try {
+        const doc = parse(query);
+        const match = findOperationWithField(doc, rootFieldName, operationType);
+        if (!match) {
+            return { next: query };
+        }
+
+        const { operation, operationIndex } = match;
+        const normalizedTree = ensureNonEmptySelection(tree, rootFieldType);
+        const selectionSet = isSelectionTreeEmpty(normalizedTree)
+            ? undefined
+            : treeToSelectionSet(normalizedTree);
+
+        const nextSelections = operation.selectionSet.selections.map((selection) => {
+            if (selection.kind !== Kind.FIELD || selection.name.value !== rootFieldName) {
+                return selection;
+            }
+            return {
+                ...selection,
+                selectionSet,
+            };
+        });
+
+        const nextOperation: OperationDefinitionNode = {
+            ...operation,
+            selectionSet: {
+                ...operation.selectionSet,
+                selections: nextSelections,
+            },
+        };
+
+        const nextDefinitions = [...doc.definitions];
+        nextDefinitions[operationIndex] = nextOperation;
+
+        // Cast definitions to any to satisfy TypeScript's readonly DefinitionNode[] expectation
+        return { next: print({ ...doc, definitions: nextDefinitions as any }) };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : 'Invalid query.';
+        return { next: query, error: message };
+    }
+}
+
+function findOperationWithField(
+    doc: import('graphql').DocumentNode,
+    rootFieldName: string,
+    operationType?: 'query' | 'mutation' | 'subscription'
+): { operation: OperationDefinitionNode; operationIndex: number; field: FieldNode } | null {
+    for (let i = 0; i < doc.definitions.length; i++) {
+        const def = doc.definitions[i];
+        if (def.kind !== Kind.OPERATION_DEFINITION) continue;
+        const operation = def as OperationDefinitionNode;
+        if (operationType && operation.operation !== operationType) continue;
+        if (!operation.selectionSet) continue;
+        for (const selection of operation.selectionSet.selections) {
+            if (selection.kind === Kind.FIELD && selection.name.value === rootFieldName) {
+                return { operation, operationIndex: i, field: selection as FieldNode };
+            }
+        }
+    }
+    return null;
+}
+
+export default function ParametersPanel({
+    contextLabel,
+    field,
+    operationType,
+}: ParametersPanelProps) {
     const store = useStore();
     const activeTab = store.getActiveTab();
+    const [activeBuilderTab, setActiveBuilderTab] = React.useState<'parameters' | 'selection'>('parameters');
     const [expandedPaths, setExpandedPaths] = React.useState<Record<string, boolean>>({});
+    const [selectionExpandedPaths, setSelectionExpandedPaths] = React.useState<Record<string, boolean>>({});
+    const rootFieldName = field?.name ?? contextLabel ?? '';
+
+    const rootFieldType = useMemo(() => {
+        if (field) return field.type;
+        if (!store.schema || !rootFieldName) return null;
+        const rootTypes = operationType
+            ? [
+                operationType === 'mutation'
+                    ? store.schema.getMutationType()
+                    : operationType === 'subscription'
+                        ? store.schema.getSubscriptionType()
+                        : store.schema.getQueryType(),
+            ]
+            : [
+                store.schema.getQueryType(),
+                store.schema.getMutationType(),
+                store.schema.getSubscriptionType(),
+            ];
+        for (const rootType of rootTypes) {
+            const fields = rootType?.getFields();
+            if (fields && fields[rootFieldName]) {
+                return fields[rootFieldName].type;
+            }
+        }
+        return null;
+    }, [field, operationType, rootFieldName, store.schema]);
+
+    const selectionState = useMemo(
+        () => parseQuerySelectionTree(activeTab.query, rootFieldName),
+        [activeTab.query, rootFieldName]
+    );
+    const selectionTree = selectionState.tree;
+    const selectionError = selectionState.error;
+    const selectionMissingRoot = selectionState.missingRoot;
+
+    const rootNamedType = useMemo(
+        () => (rootFieldType ? unwrapOutputType(rootFieldType) : null),
+        [rootFieldType]
+    );
+    const selectionSupported = rootNamedType ? isObjectLikeType(rootNamedType) : false;
+    const selectionCount = useMemo(() => countSelections(selectionTree), [selectionTree]);
 
     const inlineVariables = useMemo(
         () => parseQueryVariables(activeTab.query, store.schema),
@@ -467,6 +830,37 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
         ]
     );
 
+    const updateQuerySelectionSet = useCallback(
+        (nextTree: SelectionTree) => {
+            if (!rootFieldName) return;
+            const { next } = applySelectionTreeToQuery(
+                activeTab.query,
+                rootFieldName,
+                nextTree,
+                rootFieldType
+            );
+            if (next === activeTab.query) return;
+            store.updateTab(activeTab.id, { query: next });
+        },
+        [activeTab.id, activeTab.query, rootFieldName, rootFieldType, store]
+    );
+
+    const handleToggleSelection = useCallback(
+        (path: Path, fieldType: GraphQLOutputType, includeDefaults = true) => {
+            if (selectionError) return;
+            const isSelected = isSelectionPathSelected(selectionTree, path);
+            const defaultTree = includeDefaults
+                ? buildDefaultSelectionTree(fieldType)
+                : createSelectionTree();
+            const nextTree = isSelected
+                ? removeSelectionPath(selectionTree, path)
+                : addSelectionPath(selectionTree, path, defaultTree);
+            const normalized = ensureNonEmptySelection(nextTree, rootFieldType);
+            updateQuerySelectionSet(normalized);
+        },
+        [selectionError, selectionTree, rootFieldType, updateQuerySelectionSet]
+    );
+
     useEffect(() => {
         if (variableError || panelError) return;
         const allowed = new Set(variableDefinitions.map((def) => def.name));
@@ -501,6 +895,14 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
                 ? tone === 'inline'
                     ? "bg-emerald-500/20 text-emerald-300"
                     : "bg-amber-500/20 text-amber-300"
+                : "text-muted-foreground hover:text-foreground"
+        );
+
+    const builderTabClass = (active: boolean) =>
+        cn(
+            "px-2.5 py-1 text-[10px] font-semibold rounded-sm transition-all",
+            active
+                ? "bg-background text-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground"
         );
 
@@ -792,130 +1194,393 @@ export default function ParametersPanel({ contextLabel }: ParametersPanelProps) 
         );
     };
 
-        return (
-            <div className="rounded-md border border-border/60 bg-card/30 overflow-hidden shadow-sm">
-            <div className="flex items-center justify-between px-3 py-2 border-b bg-gradient-to-r from-primary/10 via-transparent to-transparent">
-                <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-semibold uppercase tracking-wider text-primary">
-                        Parameters
-                    </span>
-                    {contextLabel && (
-                        <Badge
-                            variant="secondary"
-                            className="h-5 px-1.5 text-[10px] font-mono bg-muted/60"
-                        >
-                            {contextLabel}
-                        </Badge>
-                    )}
-                    <Badge
-                        variant="secondary"
-                        className="h-5 px-1.5 text-[10px] font-mono"
-                    >
-                        {variableDefinitions.length}
-                    </Badge>
-                </div>
-                {variableError && (
-                    <Badge variant="destructive" className="text-[10px]">
-                        Query error
-                    </Badge>
-                )}
-            </div>
-            <ScrollArea className="max-h-none">
-                <div className="p-3 space-y-3">
-                    {variableError ? (
-                        <div className="text-xs text-muted-foreground">
-                            Fix the query syntax to load the parameter builder.
-                        </div>
-                    ) : panelError ? (
-                        <div className="text-xs text-muted-foreground">
-                            Variables JSON is invalid. Parameter edits here will overwrite it.
-                        </div>
-                    ) : variableDefinitions.length === 0 ? (
-                        <div className="text-xs text-muted-foreground">
-                            No parameters in the current operation.
-                        </div>
-                    ) : (
-                        variableDefinitions.map((definition) => {
-                            const mode = variableModes[definition.name] ?? 'inline';
-                            const sourceValues = mode === 'panel' ? panelValues : inlineValues;
-                            const hasValue = Object.prototype.hasOwnProperty.call(
-                                sourceValues,
-                                definition.name
-                            );
-                            const effectiveValue = sourceValues[definition.name];
-                            return (
-                                <div
-                                    key={definition.name}
-                                    className="space-y-2 rounded-md border border-border/60 bg-gradient-to-br from-muted/20 via-card/40 to-card p-3 shadow-[0_0_0_1px_rgba(255,255,255,0.03)]"
-                                >
-                                    <div className="flex items-center justify-between gap-2">
-                                        <div className="flex items-center gap-2 min-w-0">
-                                            <span className="font-mono text-xs font-semibold truncate">
-                                                {definition.name}
-                                            </span>
-                                            <Badge
-                                                variant="secondary"
-                                                className="h-4 px-1 text-[9px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
-                                            >
-                                                {definition.typeString}
-                                            </Badge>
-                                            {definition.required && (
+    const renderSelectionFields = (
+        type: GraphQLNamedType,
+        path: Path,
+        depth = 0
+    ): React.ReactNode => {
+        if (isUnionType(type)) {
+            return (
+                <div className="space-y-3">
+                    <div className="space-y-2">
+                        {type.getTypes().length === 0 ? (
+                            <div className="text-[11px] text-muted-foreground italic">
+                                Union has no member types.
+                            </div>
+                        ) : (
+                            type.getTypes().map((member) => {
+                                const fragmentPath: Path = [...path, `__on:${member.name}`];
+                                const fragmentKey = getPathKey(fragmentPath);
+                                const fragmentSelected = isSelectionPathSelected(
+                                    selectionTree,
+                                    fragmentPath
+                                );
+                                const shouldCollapse = depth >= DEFAULT_SELECTION_EXPANDED_DEPTH;
+                                const isExpanded = !shouldCollapse || selectionExpandedPaths[fragmentKey];
+                                return (
+                                    <div
+                                        key={member.name}
+                                        className={cn(
+                                            "rounded-md border border-border/60 p-2 space-y-2",
+                                            depthStyles[(depth + 1) % depthStyles.length]
+                                        )}
+                                    >
+                                        <div className="flex items-center justify-between gap-2">
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                <button
+                                                    className={cn(
+                                                        "h-5 w-5 rounded border border-border/60 flex items-center justify-center",
+                                                        fragmentSelected
+                                                            ? "bg-primary text-primary-foreground"
+                                                            : "bg-background text-muted-foreground hover:text-foreground"
+                                                    )}
+                                                    onClick={() =>
+                                                        handleToggleSelection(fragmentPath, member)
+                                                    }
+                                                    title={`Toggle on ${member.name}`}
+                                                >
+                                                    {fragmentSelected && <Check className="h-3 w-3" />}
+                                                </button>
+                                                <span className="text-xs font-semibold truncate">
+                                                    on {member.name}
+                                                </span>
                                                 <Badge
                                                     variant="secondary"
-                                                    className="h-4 px-1 text-[9px] uppercase tracking-wider bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                                                    className="h-4 px-1 text-[9px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
                                                 >
-                                                    Required
+                                                    Inline Fragment
                                                 </Badge>
-                                            )}
-                                            {!hasValue && (
-                                                <Badge
-                                                    variant="secondary"
-                                                    className="h-4 px-1 text-[9px] uppercase tracking-wider bg-slate-500/10 text-slate-300 border border-slate-500/30"
-                                                >
-                                                    Unset
-                                                </Badge>
-                                            )}
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <div className="inline-flex rounded-md border border-border/60 overflow-hidden">
-                                                <button
-                                                    className={modeButtonClass(mode === 'inline', 'inline')}
-                                                    onClick={() => handleSetVariableMode(definition, 'inline')}
-                                                    title="Store in query"
-                                                >
-                                                    Query
-                                                </button>
-                                                <button
-                                                    className={modeButtonClass(mode === 'panel', 'panel')}
-                                                    onClick={() => handleSetVariableMode(definition, 'panel')}
-                                                    title="Store in variables panel"
-                                                >
-                                                    Variables
-                                                </button>
                                             </div>
                                             <button
-                                                className="text-muted-foreground hover:text-destructive transition-colors disabled:opacity-40"
-                                                onClick={() => handleRemoveValue(definition.name, [definition.name])}
-                                                disabled={!hasValue}
-                                                title="Clear value"
+                                                className="text-muted-foreground hover:text-foreground transition-colors"
+                                                onClick={() =>
+                                                    setSelectionExpandedPaths((prev) => ({
+                                                        ...prev,
+                                                        [fragmentKey]: !prev[fragmentKey],
+                                                    }))
+                                                }
+                                                title={isExpanded ? 'Collapse' : 'Expand'}
                                             >
-                                                <Trash2 className="h-3 w-3" />
+                                                {isExpanded ? (
+                                                    <ChevronDown className="h-3.5 w-3.5" />
+                                                ) : (
+                                                    <ChevronRight className="h-3.5 w-3.5" />
+                                                )}
                                             </button>
                                         </div>
+                                        {isExpanded ? (
+                                            <div className="pl-3 border-l-2 rounded-md space-y-2">
+                                                {renderSelectionFields(member, fragmentPath, depth + 1)}
+                                            </div>
+                                        ) : (
+                                            <div className="text-[10px] text-muted-foreground italic">
+                                                Nested fields collapsed.
+                                            </div>
+                                        )}
                                     </div>
-                                    {renderInputForType(
-                                        definition.name,
-                                        definition.type,
-                                        effectiveValue,
-                                        [definition.name],
-                                        0
-                                    )}
+                                );
+                            })
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        if (!isObjectType(type) && !isInterfaceType(type)) {
+            return (
+                <div className="text-[11px] text-muted-foreground italic">
+                    No selectable fields for this type.
+                </div>
+            );
+        }
+
+        // Exclude GraphQL meta fields (names starting with __) from the selectable list
+        const selectableFields = Object.values(type.getFields())
+            .filter((f) => !f.name.startsWith('__'))
+            .map((field) => ({
+                name: field.name,
+                type: field.type,
+                description: field.description,
+            }));
+
+        return (
+            <div className="space-y-2">
+                {selectableFields.map((field) => {
+                    const fieldPath: Path = [...path, field.name];
+                    const fieldKey = getPathKey(fieldPath);
+                    const isSelected = isSelectionPathSelected(selectionTree, fieldPath);
+                    const namedType = unwrapOutputType(field.type);
+                    const isNested = isObjectLikeType(namedType);
+                    const shouldCollapse = isNested && depth >= DEFAULT_SELECTION_EXPANDED_DEPTH;
+                    const isExpanded = isNested && (!shouldCollapse || selectionExpandedPaths[fieldKey]);
+
+                    return (
+                        <div key={fieldKey} className="space-y-1">
+                            <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                    <button
+                                        className={cn(
+                                            "h-5 w-5 rounded border border-border/60 flex items-center justify-center",
+                                            isSelected
+                                                ? "bg-primary text-primary-foreground"
+                                                : "bg-background text-muted-foreground hover:text-foreground"
+                                        )}
+                                        onClick={() => handleToggleSelection(fieldPath, field.type)}
+                                        title={`Toggle ${field.name}`}
+                                    >
+                                        {isSelected && <Check className="h-3 w-3" />}
+                                    </button>
+                                    <span className="font-mono text-xs font-semibold truncate">
+                                        {field.name}
+                                    </span>
+                                    <Badge
+                                        variant="secondary"
+                                        className="h-4 px-1 text-[9px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
+                                    >
+                                        {getTypeString(field.type)}
+                                    </Badge>
                                 </div>
-                            );
-                        })
+                                {isNested && (
+                                    <button
+                                        className="text-muted-foreground hover:text-foreground transition-colors"
+                                        onClick={() =>
+                                            setSelectionExpandedPaths((prev) => ({
+                                                ...prev,
+                                                [fieldKey]: !prev[fieldKey],
+                                            }))
+                                        }
+                                        title={isExpanded ? 'Collapse' : 'Expand'}
+                                    >
+                                        {isExpanded ? (
+                                            <ChevronDown className="h-3.5 w-3.5" />
+                                        ) : (
+                                            <ChevronRight className="h-3.5 w-3.5" />
+                                        )}
+                                    </button>
+                                )}
+                            </div>
+                            {field.description && (
+                                <p className="text-[10px] text-muted-foreground leading-relaxed">
+                                    {field.description}
+                                </p>
+                            )}
+                            {isNested && isExpanded && (
+                                <div
+                                    className={cn(
+                                        "pl-3 border-l-2 rounded-md p-2 space-y-2",
+                                        depthStyles[(depth + 1) % depthStyles.length]
+                                    )}
+                                >
+                                    {renderSelectionFields(namedType, fieldPath, depth + 1)}
+                                </div>
+                            )}
+                            {isNested && !isExpanded && shouldCollapse && (
+                                <div className="text-[10px] text-muted-foreground italic">
+                                    Nested fields collapsed.
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
+            </div>
+        );
+    };
+
+    const renderParametersContent = () => {
+        if (variableError) {
+            return (
+                <div className="text-xs text-muted-foreground">
+                    Fix the query syntax to load the parameter builder.
+                </div>
+            );
+        }
+        if (panelError) {
+            return (
+                <div className="text-xs text-muted-foreground">
+                    Variables JSON is invalid. Parameter edits here will overwrite it.
+                </div>
+            );
+        }
+        if (variableDefinitions.length === 0) {
+            return (
+                <div className="text-xs text-muted-foreground">
+                    No parameters in the current operation.
+                </div>
+            );
+        }
+        return variableDefinitions.map((definition) => {
+            const mode = variableModes[definition.name] ?? 'inline';
+            const sourceValues = mode === 'panel' ? panelValues : inlineValues;
+            const hasValue = Object.prototype.hasOwnProperty.call(
+                sourceValues,
+                definition.name
+            );
+            const effectiveValue = sourceValues[definition.name];
+            return (
+                <div
+                    key={definition.name}
+                    className="space-y-2 rounded-md border border-border/60 bg-gradient-to-br from-muted/20 via-card/40 to-card p-3 shadow-[0_0_0_1px_rgba(255,255,255,0.03)]"
+                >
+                    <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-mono text-xs font-semibold truncate">
+                                {definition.name}
+                            </span>
+                            <Badge
+                                variant="secondary"
+                                className="h-4 px-1 text-[9px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
+                            >
+                                {definition.typeString}
+                            </Badge>
+                            {definition.required && (
+                                <Badge
+                                    variant="secondary"
+                                    className="h-4 px-1 text-[9px] uppercase tracking-wider bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                                >
+                                    Required
+                                </Badge>
+                            )}
+                            {!hasValue && (
+                                <Badge
+                                    variant="secondary"
+                                    className="h-4 px-1 text-[9px] uppercase tracking-wider bg-slate-500/10 text-slate-300 border border-slate-500/30"
+                                >
+                                    Unset
+                                </Badge>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className="inline-flex rounded-md border border-border/60 overflow-hidden">
+                                <button
+                                    className={modeButtonClass(mode === 'inline', 'inline')}
+                                    onClick={() => handleSetVariableMode(definition, 'inline')}
+                                    title="Store in query"
+                                >
+                                    Query
+                                </button>
+                                <button
+                                    className={modeButtonClass(mode === 'panel', 'panel')}
+                                    onClick={() => handleSetVariableMode(definition, 'panel')}
+                                    title="Store in variables panel"
+                                >
+                                    Variables
+                                </button>
+                            </div>
+                            <button
+                                className="text-muted-foreground hover:text-destructive transition-colors disabled:opacity-40"
+                                onClick={() => handleRemoveValue(definition.name, [definition.name])}
+                                disabled={!hasValue}
+                                title="Clear value"
+                            >
+                                <Trash2 className="h-3 w-3" />
+                            </button>
+                        </div>
+                    </div>
+                    {renderInputForType(
+                        definition.name,
+                        definition.type,
+                        effectiveValue,
+                        [definition.name],
+                        0
                     )}
                 </div>
-            </ScrollArea>
+            );
+        });
+    };
+
+    const renderSelectionSetContent = () => {
+        if (!rootFieldName) {
+            return (
+                <div className="text-xs text-muted-foreground">
+                    Select a query field to edit its selection set.
+                </div>
+            );
+        }
+        if (selectionError) {
+            return (
+                <div className="text-xs text-muted-foreground">
+                    Fix the query syntax to edit the selection set.
+                </div>
+            );
+        }
+        if (!rootFieldType || !rootNamedType) {
+            return (
+                <div className="text-xs text-muted-foreground">
+                    Selection set builder needs a valid field in the schema.
+                </div>
+            );
+        }
+        if (!selectionSupported) {
+            return (
+                <div className="text-xs text-muted-foreground">
+                    This field returns a scalar value, so no selection set is required.
+                </div>
+            );
+        }
+        return (
+            <div className="space-y-3">
+                <div className="text-[11px] text-muted-foreground">
+                    Selection set for{" "}
+                    <span className="font-mono text-foreground">{rootFieldName}</span>{" "}
+                    <span className="font-mono text-muted-foreground">{getTypeString(rootFieldType)}</span>
+                </div>
+                {selectionMissingRoot && (
+                    <div className="text-[10px] text-amber-300/80">
+                        Current query does not include this field. Changes here will insert it.
+                    </div>
+                )}
+                {renderSelectionFields(rootNamedType, [], 0)}
+            </div>
+        );
+    };
+
+    return (
+        <div className="flex flex-col h-full">
+            <div className="flex items-center border-b border-border/60">
+                <div className="flex gap-2">
+                    <Button
+                        variant={activeBuilderTab === 'parameters' ? 'default' : 'ghost'}
+                        className="h-9 px-3 text-sm font-semibold"
+                        onClick={() => setActiveBuilderTab('parameters')}
+                    >
+                        Parameters
+                    </Button>
+                    <Button
+                        variant={activeBuilderTab === 'selection' ? 'default' : 'ghost'}
+                        className="h-9 px-3 text-sm font-semibold"
+                        onClick={() => setActiveBuilderTab('selection')}
+                        disabled={!selectionSupported}
+                    >
+                        Selection Set
+                    </Button>
+                </div>
+                <div className="ml-auto flex items-center gap-2">
+                    <Badge
+                        variant="secondary"
+                        className="h-4 px-1 text-[9px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
+                    >
+                        {operationType
+                            ? (operationType.charAt(0).toUpperCase() + operationType.slice(1))
+                            : 'Query'}
+                    </Badge>
+                    {field && (
+                        <Badge
+                            variant="secondary"
+                            className="h-4 px-1 text-[9px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
+                        >
+                            {field.name}
+                        </Badge>
+                    )}
+                </div>
+            </div>
+            <div className="flex-1 overflow-hidden">
+                <ScrollArea className="h-full pr-4">
+                    <div className="p-4 space-y-4">
+                        {activeBuilderTab === 'parameters' && renderParametersContent()}
+                        {activeBuilderTab === 'selection' && renderSelectionSetContent()}
+                    </div>
+                </ScrollArea>
+            </div>
         </div>
     );
 }

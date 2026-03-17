@@ -80,16 +80,17 @@ export default function DocsPanel({ activeView = 'docs', setActiveView }: DocsPa
         const lowerSearch = search.toLowerCase();
         const result: Partial<SchemaDocs> = {};
         (Object.keys(docs) as Array<keyof SchemaDocs>).forEach((key) => {
-            const items = docs[key];
-            const filtered = items.filter((item) => {
+            const items = docs[key] as any[];
+            const filtered = items.filter((item: any) => {
                 const name = item.name || '';
                 const desc = item.description || '';
                 return (
                     name.toLowerCase().includes(lowerSearch) ||
                     desc.toLowerCase().includes(lowerSearch)
                 );
-            }) as typeof items;
-            result[key] = filtered;
+            });
+            // Assign with a type cast since Partial<SchemaDocs> accepts union member arrays
+            result[key] = filtered as any;
         });
         return result;
     }, [docs, search]);
@@ -378,7 +379,7 @@ export default function DocsPanel({ activeView = 'docs', setActiveView }: DocsPa
                                                     </button>
                                                     {field.args && field.args.length > 0 && (
                                                         <span className="text-xs text-muted-foreground truncate">
-                                                            ({field.args.map((a) => a.name).join(', ')})
+                                                            ({field.args.map((a: any) => a.name).join(', ')})
                                                         </span>
                                                     )}
                                                 </div>
@@ -460,6 +461,12 @@ export default function DocsPanel({ activeView = 'docs', setActiveView }: DocsPa
                                     <div className="space-y-px">
                                         {items.map((item) => {
                                             const isField = key === 'queries' || key === 'mutations' || key === 'subscriptions';
+                                            const operationType =
+                                                key === 'mutations'
+                                                    ? 'mutation'
+                                                    : key === 'subscriptions'
+                                                        ? 'subscription'
+                                                        : 'query';
                                             const isExpanded =
                                                 isField &&
                                                 expandedField?.name === item.name &&
@@ -504,7 +511,11 @@ export default function DocsPanel({ activeView = 'docs', setActiveView }: DocsPa
                                                     </button>
                                                     {isExpanded && activeView !== 'explore' && (
                                                         <div className="pl-3 pr-2 pb-2">
-                                                            <ParametersPanel contextLabel={item.name} />
+                                                            <ParametersPanel
+                                                                contextLabel={item.name}
+                                                                field={item as GraphQLField<unknown, unknown>}
+                                                                operationType={operationType}
+                                                            />
                                                         </div>
                                                     )}
                                                 </div>
