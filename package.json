@@ -28,6 +28,7 @@
     "graphql": "^16.13.1",
     "graphql-language-service": "^5.5.0",
     "lucide-react": "^0.577.0",
+    "monaco-editor": "^0.55.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-resizable-panels": "^4.7.2",

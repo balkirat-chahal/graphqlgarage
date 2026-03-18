@@ -1,13 +1,7 @@
-import {
-    GraphQLSchema,
-    GraphQLObjectType,
-    isObjectType,
-    GraphQLType,
-    GraphQLField,
-    isNonNullType,
-    isListType,
-} from 'graphql';
+import { GraphQLSchema, isObjectType } from 'graphql';
+import { getAutocompleteSuggestions } from 'graphql-language-service';
 import type * as Monaco from 'monaco-editor';
+import type { CompletionItem as LspCompletionItem } from 'graphql-language-service';
 
 /**
  * GraphQL Language Support for Monaco Editor
@@ -186,21 +180,9 @@ export function createCompletionProvider(
 ): Monaco.languages.CompletionItemProvider | null {
     if (!schema) return null;
 
-    const typeMap = schema.getTypeMap();
-    const queryType = schema.getQueryType();
-    const mutationType = schema.getMutationType();
-    const subscriptionType = schema.getSubscriptionType();
-
     return {
         triggerCharacters: ['{', '(', ':', ' ', '\n', '.', '$', '@'],
         provideCompletionItems: (model, position) => {
-            const textUntilPosition = model.getValueInRange({
-                startLineNumber: 1,
-                startColumn: 1,
-                endLineNumber: position.lineNumber,
-                endColumn: position.column,
-            });
-
             const word = model.getWordUntilPosition(position);
             const range: Monaco.IRange = {
                 startLineNumber: position.lineNumber,
@@ -209,117 +191,24 @@ export function createCompletionProvider(
                 endColumn: word.endColumn,
             };
 
-            const suggestions: Monaco.languages.CompletionItem[] = [];
-
-            // Detect context
-            const lines = textUntilPosition.split('\n');
-            const currentLine = lines[lines.length - 1] || '';
-
-            // Top-level keywords
-            const topLevel = textUntilPosition.trim();
-            if (!topLevel || /^\s*$/.test(currentLine)) {
-                const braceDepth = countChar(textUntilPosition, '{') - countChar(textUntilPosition, '}');
-                if (braceDepth === 0) {
-                    suggestions.push(
-                        makeKeyword('query', range, 'Define a query operation'),
-                        makeKeyword('mutation', range, 'Define a mutation operation'),
-                        makeKeyword('subscription', range, 'Define a subscription operation'),
-                        makeKeyword('fragment', range, 'Define a reusable fragment'),
-                    );
-                }
+            const cursor = {
+                line: position.lineNumber - 1,
+                character: position.column - 1,
+            };
+            let rawSuggestions: LspCompletionItem[] = [];
+            try {
+                rawSuggestions = getAutocompleteSuggestions(
+                    schema,
+                    model.getValue(),
+                    cursor
+                );
+            } catch {
+                return { suggestions: [] };
             }
 
-            // Field suggestions inside braces
-            const braceDepth = countChar(textUntilPosition, '{') - countChar(textUntilPosition, '}');
-            if (braceDepth > 0) {
-                // Try to determine which type we're in
-                const rootType = detectRootType(textUntilPosition, queryType, mutationType, subscriptionType);
-                if (rootType && braceDepth === 1) {
-                    // Root-level fields
-                    const fields = rootType.getFields();
-                    for (const [name, field] of Object.entries(fields)) {
-                        suggestions.push(makeFieldSuggestion(name, field, range));
-                    }
-                } else if (braceDepth > 1) {
-                    // Nested fields — try to find the enclosing type
-                    const enclosingType = findEnclosingType(textUntilPosition, schema, queryType, mutationType, subscriptionType);
-                    if (enclosingType && isObjectType(enclosingType)) {
-                        const fields = enclosingType.getFields();
-                        for (const [name, field] of Object.entries(fields)) {
-                            suggestions.push(makeFieldSuggestion(name, field, range));
-                        }
-                    }
-                }
-
-                // Always suggest __typename
-                suggestions.push({
-                    label: '__typename',
-                    kind: 5, // Field
-                    detail: 'String!',
-                    documentation: 'The name of the current Object type',
-                    insertText: '__typename',
-                    range,
-                    sortText: 'zzz__typename',
-                });
-            }
-
-            // Argument suggestions inside parentheses
-            const parenDepth = countChar(textUntilPosition, '(') - countChar(textUntilPosition, ')');
-            if (parenDepth > 0) {
-                // Find the field name before the parens
-                const fieldMatch = textUntilPosition.match(/(\w+)\s*\([^)]*$/);
-                if (fieldMatch) {
-                    const fieldName = fieldMatch[1];
-                    const rootType = detectRootType(textUntilPosition, queryType, mutationType, subscriptionType);
-                    if (rootType) {
-                        const fields = rootType.getFields();
-                        const field = fields[fieldName];
-                        if (field && field.args) {
-                            for (const arg of field.args) {
-                                suggestions.push({
-                                    label: arg.name,
-                                    kind: 5,
-                                    detail: arg.type.toString(),
-                                    documentation: arg.description || '',
-                                    insertText: `${arg.name}: `,
-                                    range,
-                                    sortText: `0_${arg.name}`,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Type name suggestions (after "on", or in variable types)
-            if (/\bon\s+\w*$/.test(currentLine) || /:\s*\w*$/.test(currentLine)) {
-                for (const [name, type] of Object.entries(typeMap)) {
-                    if (name.startsWith('__')) continue;
-                    suggestions.push({
-                        label: name,
-                        kind: 7, // Class/Type
-                        detail: type.constructor.name.replace('GraphQL', ''),
-                        documentation: type.description || '',
-                        insertText: name,
-                        range,
-                    });
-                }
-            }
-
-            // Directive suggestions
-            if (currentLine.includes('@')) {
-                const directives = schema.getDirectives();
-                for (const dir of directives) {
-                    suggestions.push({
-                        label: `@${dir.name}`,
-                        kind: 1, // Method
-                        detail: 'directive',
-                        documentation: dir.description || '',
-                        insertText: dir.name,
-                        range,
-                    });
-                }
-            }
+            const suggestions = rawSuggestions
+                .filter((item) => !item.label.startsWith('__'))
+                .map((item) => toMonacoCompletionItem(item, range));
 
             return { suggestions };
         },
@@ -372,127 +261,97 @@ export function createHoverProvider(
 
 // ========== Helpers ==========
 
-function countChar(str: string, char: string): number {
-    let count = 0;
-    for (let i = 0; i < str.length; i++) {
-        if (str[i] === char) count++;
-    }
-    return count;
-}
+const MONACO_COMPLETION_KIND = {
+    Method: 0,
+    Function: 1,
+    Constructor: 2,
+    Field: 3,
+    Variable: 4,
+    Class: 5,
+    Struct: 6,
+    Interface: 7,
+    Module: 8,
+    Property: 9,
+    Event: 10,
+    Operator: 11,
+    Unit: 12,
+    Value: 13,
+    Constant: 14,
+    Enum: 15,
+    EnumMember: 16,
+    Keyword: 17,
+    Text: 18,
+    Color: 19,
+    File: 20,
+    Reference: 21,
+    Folder: 23,
+    TypeParameter: 24,
+    Snippet: 28,
+} as const;
 
-function detectRootType(text: string, queryType: GraphQLObjectType | null | undefined, mutationType: GraphQLObjectType | null | undefined, subscriptionType: GraphQLObjectType | null | undefined): GraphQLObjectType | null | undefined {
-    // Find the last operation keyword before the first brace
-    const match = text.match(/(query|mutation|subscription)\b/g);
-    if (!match) return queryType;
-    const lastOp = match[match.length - 1];
-    if (lastOp === 'mutation') return mutationType;
-    if (lastOp === 'subscription') return subscriptionType;
-    return queryType;
-}
+const MONACO_INSERT_TEXT_RULE = {
+    None: 0,
+    InsertAsSnippet: 4,
+} as const;
 
-function findEnclosingType(text: string, schema: GraphQLSchema, queryType: GraphQLObjectType | null | undefined, mutationType: GraphQLObjectType | null | undefined, subscriptionType: GraphQLObjectType | null | undefined): GraphQLType | null {
-    // Simple approach: find the field names in the path from root to cursor
-    const rootType = detectRootType(text, queryType, mutationType, subscriptionType);
-    if (!rootType) return null;
+const lspToMonacoKind: Record<number, number> = {
+    1: MONACO_COMPLETION_KIND.Text,
+    2: MONACO_COMPLETION_KIND.Method,
+    3: MONACO_COMPLETION_KIND.Function,
+    4: MONACO_COMPLETION_KIND.Constructor,
+    5: MONACO_COMPLETION_KIND.Field,
+    6: MONACO_COMPLETION_KIND.Variable,
+    7: MONACO_COMPLETION_KIND.Class,
+    8: MONACO_COMPLETION_KIND.Interface,
+    9: MONACO_COMPLETION_KIND.Module,
+    10: MONACO_COMPLETION_KIND.Property,
+    11: MONACO_COMPLETION_KIND.Unit,
+    12: MONACO_COMPLETION_KIND.Value,
+    13: MONACO_COMPLETION_KIND.Enum,
+    14: MONACO_COMPLETION_KIND.Keyword,
+    15: MONACO_COMPLETION_KIND.Snippet,
+    16: MONACO_COMPLETION_KIND.Color,
+    17: MONACO_COMPLETION_KIND.File,
+    18: MONACO_COMPLETION_KIND.Reference,
+    19: MONACO_COMPLETION_KIND.Folder,
+    20: MONACO_COMPLETION_KIND.EnumMember,
+    21: MONACO_COMPLETION_KIND.Constant,
+    22: MONACO_COMPLETION_KIND.Struct,
+    23: MONACO_COMPLETION_KIND.Event,
+    24: MONACO_COMPLETION_KIND.Operator,
+    25: MONACO_COMPLETION_KIND.TypeParameter,
+};
 
-    // Extract field names between braces
-    let currentField = '';
-
-    const tokens = text.match(/[{}]|\b\w+\b/g) || [];
-    const fieldStack: string[] = [];
-
-    for (const token of tokens) {
-        if (token === '{') {
-            if (currentField) {
-                fieldStack.push(currentField);
-            }
-            currentField = '';
-        } else if (token === '}') {
-            fieldStack.pop();
-            currentField = '';
-        } else if (
-            !['query', 'mutation', 'subscription', 'fragment', 'on', 'true', 'false', 'null'].includes(token)
-        ) {
-            currentField = token;
-        }
-    }
-
-    // walk the type tree
-    let currentType: GraphQLType | null = rootType;
-    for (const fieldName of fieldStack) {
-        if (!currentType || !isObjectType(currentType)) return null;
-        const fields = currentType.getFields();
-        const field = fields[fieldName];
-        if (!field) return null;
-        currentType = unwrapType(field.type);
-    }
-
-    return currentType;
-}
-
-function unwrapType(type: GraphQLType | null | undefined): GraphQLType | null {
-    if (!type) return null;
-    if (isNonNullType(type) || isListType(type)) return unwrapType(type.ofType);
-    return type;
-}
-
-function makeKeyword(
-    label: string,
-    range: Monaco.IRange,
-    doc: string
-): Monaco.languages.CompletionItem {
-    return {
-        label,
-        kind: 14, // Keyword
-        documentation: doc,
-        insertText: `${label} {\n  $0\n}`,
-        insertTextRules: Monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-        range,
-        sortText: `0_${label}`,
-    };
-}
-
-function makeFieldSuggestion(
-    name: string,
-    field: GraphQLField<unknown, unknown>,
+function toMonacoCompletionItem(
+    item: LspCompletionItem,
     range: Monaco.IRange
 ): Monaco.languages.CompletionItem {
-    const type = field.type.toString();
-    const hasArgs = field.args && field.args.length > 0;
-    const hasSubFields = hasObjectSubFields(field.type);
+    const documentation =
+        typeof item.documentation === 'string'
+            ? item.documentation
+            : item.documentation && typeof item.documentation === 'object' && 'value' in item.documentation
+                ? item.documentation.value
+                : undefined;
 
-    let insertText = name;
-    if (hasArgs) {
-        const requiredArgs = field.args.filter(
-            (a) => isNonNullType(a.type)
-        );
-        if (requiredArgs.length > 0) {
-            const argSnippets = requiredArgs.map(
-                (a, i) => `${a.name}: $\{${i + 1}}`
-            );
-            insertText = `${name}(${argSnippets.join(', ')})`;
-        }
-    }
-    if (hasSubFields) {
-        insertText += ' {\n  $0\n}';
-    }
+    const kind =
+        typeof item.kind === 'number'
+            ? lspToMonacoKind[item.kind] ?? MONACO_COMPLETION_KIND.Text
+            : MONACO_COMPLETION_KIND.Text;
+
+    const insertText = item.insertText ?? item.label;
+    const insertTextRules =
+        item.insertTextFormat === 2
+            ? MONACO_INSERT_TEXT_RULE.InsertAsSnippet
+            : MONACO_INSERT_TEXT_RULE.None;
 
     return {
-        label: name,
-        kind: 5, // Field
-        detail: type,
-        documentation: field.description || '',
+        label: item.label,
+        kind: kind as Monaco.languages.CompletionItemKind,
+        detail: item.detail,
+        documentation,
         insertText,
-        insertTextRules:
-            hasSubFields || hasArgs
-                ? Monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
-                : Monaco.languages.CompletionItemInsertTextRule.None,
+        insertTextRules: insertTextRules as Monaco.languages.CompletionItemInsertTextRule,
+        sortText: item.sortText,
         range,
-        sortText: `1_${name}`,
     };
-}
-
-function hasObjectSubFields(type: GraphQLType): boolean {
-    const unwrapped = unwrapType(type);
-    return !!unwrapped && isObjectType(unwrapped);
 }

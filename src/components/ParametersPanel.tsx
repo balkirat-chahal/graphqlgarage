@@ -838,6 +838,7 @@ export default function ParametersPanel({
     );
     const panelValues = panelState.value;
     const panelError = panelState.error;
+    const lastPanelValuesRef = React.useRef<Record<string, VariablesShape>>({});
 
     const parameterModes = useMemo(() => {
         const modes: Record<string, 'inline' | 'panel'> = {};
@@ -1038,6 +1039,12 @@ export default function ParametersPanel({
     );
 
     useEffect(() => {
+        if (!Object.prototype.hasOwnProperty.call(lastPanelValuesRef.current, activeTab.id)) {
+            lastPanelValuesRef.current[activeTab.id] = panelValues;
+        }
+    }, [activeTab.id, panelValues]);
+
+    useEffect(() => {
         if (argumentError || panelError || variableDefinitionError) return;
         const allowed = new Set(variableDefinitionNames);
         const sanitized: VariablesShape = {};
@@ -1060,9 +1067,19 @@ export default function ParametersPanel({
 
     useEffect(() => {
         if (argumentError || panelError) return;
+        const lastForTab = lastPanelValuesRef.current[activeTab.id];
+        if (lastForTab && areValuesEqual(lastForTab, panelValues)) return;
+        lastPanelValuesRef.current[activeTab.id] = panelValues;
         const base = buildInlineArgumentsBase();
         updateQueryWithParameters(base);
-    }, [argumentError, buildInlineArgumentsBase, panelError, updateQueryWithParameters]);
+    }, [
+        activeTab.id,
+        argumentError,
+        buildInlineArgumentsBase,
+        panelError,
+        panelValues,
+        updateQueryWithParameters,
+    ]);
 
     const depthStyles = [
         "border-emerald-500/40 bg-emerald-500/5",
