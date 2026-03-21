@@ -31,20 +31,22 @@ import {
     TooltipTrigger,
 } from "@/components/ui/tooltip"
 import type { GraphQLSchema } from 'graphql';
-import type * as Monaco from 'monaco-editor';
+import type * as Monaco from 'monaco-editor/esm/vs/editor/editor.api';
+
+type MonacoApi = typeof import('monaco-editor/esm/vs/editor/editor.api');
 
 export default function QueryEditor() {
     const store = useStore();
     const { toast } = useToast();
     const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
-    const monacoRef = useRef<typeof import('monaco-editor') | null>(null);
+    const monacoRef = useRef<MonacoApi | null>(null);
     const completionDisposableRef = useRef<Monaco.IDisposable | null>(null);
     const hoverDisposableRef = useRef<Monaco.IDisposable | null>(null);
     const [showShortcuts, setShowShortcuts] = useState(false);
 
     const activeTab = store.getActiveTab();
 
-    const registerProviders = useCallback((monaco: typeof import('monaco-editor'), schema: GraphQLSchema) => {
+    const registerProviders = useCallback((monaco: MonacoApi, schema: GraphQLSchema) => {
         // Dispose previous providers
         if (completionDisposableRef.current) {
             completionDisposableRef.current.dispose();

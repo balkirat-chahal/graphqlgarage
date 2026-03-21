@@ -35,7 +35,7 @@ const SCALAR_MAP: Record<string, string> = {
 
 const isBuiltInScalar = (name: string) => Object.prototype.hasOwnProperty.call(SCALAR_MAP, name);
 
-const printDescription = (description?: string, indent = ''): string[] => {
+const printDescription = (description?: string | null, indent = ''): string[] => {
     if (!description) return [];
     const lines = description.split('\n').map((line) => line.trim()).filter(Boolean);
     if (lines.length === 0) return [];
@@ -102,7 +102,7 @@ const generateTypeScriptTypes = (schema: GraphQLSchema): string => {
 
     const emitInterface = (
         name: string,
-        fields: Record<string, { type: GraphQLType; description?: string }>,
+        fields: Record<string, { type: GraphQLType; description?: string | null }>,
         inputMode: boolean
     ) => {
         lines.push(`export interface ${name} {`);

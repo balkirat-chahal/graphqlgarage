@@ -255,10 +255,10 @@ export function getTypeString(type: TypeRef | null | undefined): string {
     // Introspection result format
     const maybeIntrospection = type as IntrospectionTypeRef;
     if (maybeIntrospection.kind === 'NON_NULL') {
-        return `${getTypeString(type.ofType)}!`;
+        return `${getTypeString(maybeIntrospection.ofType)}!`;
     }
     if (maybeIntrospection.kind === 'LIST') {
-        return `[${getTypeString(type.ofType)}]`;
+        return `[${getTypeString(maybeIntrospection.ofType)}]`;
     }
 
     return (type as { name?: string }).name || type.toString();

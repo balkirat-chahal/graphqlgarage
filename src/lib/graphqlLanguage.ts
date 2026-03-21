@@ -1,6 +1,7 @@
 import { GraphQLSchema, isObjectType } from 'graphql';
 import { getAutocompleteSuggestions } from 'graphql-language-service';
-import type * as Monaco from 'monaco-editor';
+import { Position } from 'graphql-language-service/esm/utils/Range';
+import type * as Monaco from 'monaco-editor/esm/vs/editor/editor.api';
 import type { CompletionItem as LspCompletionItem } from 'graphql-language-service';
 
 /**
@@ -162,7 +163,7 @@ export const graphqlLightTheme: Monaco.editor.IStandaloneThemeData = {
 /**
  * Register GraphQL language and themes in Monaco
  */
-export function registerGraphQLLanguage(monaco: typeof import('monaco-editor')) {
+export function registerGraphQLLanguage(monaco: MonacoApi) {
     if (!monaco.languages.getLanguages().find((l) => l.id === 'graphql')) {
         monaco.languages.register({ id: 'graphql' });
         monaco.languages.setMonarchTokensProvider('graphql', graphqlLanguageDef);
@@ -191,10 +192,10 @@ export function createCompletionProvider(
                 endColumn: word.endColumn,
             };
 
-            const cursor = {
-                line: position.lineNumber - 1,
-                character: position.column - 1,
-            };
+            const cursor = new Position(
+                position.lineNumber - 1,
+                position.column - 1
+            );
             let rawSuggestions: LspCompletionItem[] = [];
             try {
                 rawSuggestions = getAutocompleteSuggestions(
@@ -329,9 +330,7 @@ function toMonacoCompletionItem(
     const documentation =
         typeof item.documentation === 'string'
             ? item.documentation
-            : item.documentation && typeof item.documentation === 'object' && 'value' in item.documentation
-                ? item.documentation.value
-                : undefined;
+            : undefined;
 
     const kind =
         typeof item.kind === 'number'
@@ -355,3 +354,4 @@ function toMonacoCompletionItem(
         range,
     };
 }
+type MonacoApi = typeof import('monaco-editor/esm/vs/editor/editor.api');

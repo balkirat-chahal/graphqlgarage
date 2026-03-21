@@ -21,6 +21,14 @@ import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/hooks/use-toast"
 import { cn } from '@/lib/utils';
 
+const SNIPPET_LANGUAGES: Array<{ id: keyof Snippets; label: string }> = [
+    { id: 'javascript', label: 'JS Fetch' },
+    { id: 'curl', label: 'cURL' },
+    { id: 'python', label: 'Python' },
+    { id: 'php', label: 'PHP' },
+    { id: 'csharp', label: 'C#' },
+];
+
 export default function ResponsePanel() {
     const store = useStore();
     const { toast } = useToast();
@@ -167,13 +175,7 @@ export default function ResponsePanel() {
             {/* Snippet language bar */}
             {activeView === 'code' && (
                 <div className="flex items-center gap-1 px-2 h-9 border-b bg-muted/20 overflow-x-auto scrollbar-hide">
-                    {[
-                        { id: 'javascript', label: 'JS Fetch' },
-                        { id: 'curl', label: 'cURL' },
-                        { id: 'python', label: 'Python' },
-                        { id: 'php', label: 'PHP' },
-                        { id: 'csharp', label: 'C#' },
-                    ].map(lang => (
+                    {SNIPPET_LANGUAGES.map((lang) => (
                         <button
                             key={lang.id}
                             onClick={() => setCodeLanguage(lang.id)}
